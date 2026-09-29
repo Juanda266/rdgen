@@ -19,6 +19,21 @@ from PIL import Image
 from urllib.parse import quote
 
 
+_SAFE_PART = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
+
+def _safe_join(base, *parts):
+    """JUSTECNO: une rutas solo si cada parte es un nombre simple (sin '/', '..' ni absolutos)
+    y el resultado queda dentro de base. Evita leer/escribir archivos arbitrarios."""
+    for part in parts:
+        if not isinstance(part, str) or not _SAFE_PART.match(part) or part in ('.', '..'):
+            return None
+    base_abs = os.path.abspath(base)
+    path = os.path.abspath(os.path.join(base_abs, *parts))
+    if not path.startswith(base_abs + os.sep):
+        return None
+    return path
+
+
 def generate_custom_client(params, full_url):
     """
     Core generation logic shared by web form and JSON API.
@@ -109,7 +124,7 @@ def generate_custom_client(params, full_url):
         iconfile = params.get('iconfile')
         if not iconfile:
             iconfile = params.get('iconbase64')
-        iconlink_url, iconlink_uuid, iconlink_file = save_png(iconfile,myuuid,full_url,"icon.png")
+        iconlink_url, iconlink_uuid, iconlink_file = save_png(iconfile,myuuid,(_settings.GENURL or full_url),"icon.png")
     except:
         print("failed to get icon, using default")
         iconlink_url = "false"
@@ -119,7 +134,7 @@ def generate_custom_client(params, full_url):
         logofile = params.get('logofile')
         if not logofile:
             logofile = params.get('logobase64')
-        logolink_url, logolink_uuid, logolink_file = save_png(logofile,myuuid,full_url,"logo.png")
+        logolink_url, logolink_uuid, logolink_file = save_png(logofile,myuuid,(_settings.GENURL or full_url),"logo.png")
     except:
         print("failed to get logo")
         logolink_url = "false"
@@ -129,7 +144,7 @@ def generate_custom_client(params, full_url):
         privacyfile = params.get('privacyfile')
         if not privacyfile:
             privacyfile = params.get('privacybase64')
-        privacylink_url, privacylink_uuid, privacylink_file = save_png(privacyfile,myuuid,full_url,"privacy.png")
+        privacylink_url, privacylink_uuid, privacylink_file = save_png(privacyfile,myuuid,(_settings.GENURL or full_url),"privacy.png")
     except:
         print("failed to get logo")
         privacylink_url = "false"
@@ -451,7 +466,9 @@ def check_for_file(request):
 def download(request):
     filename = request.GET['filename']
     uuid = request.GET['uuid']
-    file_path = os.path.join('exe', uuid, filename)
+    file_path = _safe_join('exe', uuid, filename)
+    if not file_path or not os.path.isfile(file_path):
+        return HttpResponseForbidden("Invalid filename")
     with open(file_path, 'rb') as file:
         content = file.read()
     response = HttpResponse(content, headers={
@@ -464,7 +481,9 @@ def get_png(request):
     filename = request.GET['filename']
     uuid = request.GET['uuid']
     #filename = filename+".exe"
-    file_path = os.path.join('png',uuid,filename)
+    file_path = _safe_join('png', uuid, filename)
+    if not file_path or not os.path.isfile(file_path):
+        return HttpResponseForbidden("Invalid filename")
     with open(file_path, 'rb') as file:
         response = HttpResponse(file, headers={
             'Content-Type': 'application/vnd.microsoft.portable-executable',
@@ -586,8 +605,10 @@ def save_png(file, uuid, domain, name):
 def save_custom_client(request):
     file = request.FILES['file']
     myuuid = request.POST.get('uuid')
-    file_save_path = "exe/%s/%s" % (myuuid, file.name)
-    Path("exe/%s" % myuuid).mkdir(parents=True, exist_ok=True)
+    file_save_path = _safe_join('exe', myuuid or '', os.path.basename(file.name or ''))
+    if not file_save_path:
+        return HttpResponseForbidden("Invalid uuid or filename")
+    Path(os.path.dirname(file_save_path)).mkdir(parents=True, exist_ok=True)
     with open(file_save_path, "wb+") as f:
         for chunk in file.chunks():
             f.write(chunk)

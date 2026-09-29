@@ -78,9 +78,9 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: encrypted-secrets-zip
 
@@ -92,7 +92,7 @@ jobs:
       - name: Finalize and Cleanup zip/json
         if: always() # Run even if previous steps fail
         continue-on-error: true
-        uses: fjogeleit/http-request-action@v1
+        uses: fjogeleit/http-request-action@c0b95d02a088b47c1f2f4db04fd8af8bd19eee54 # v1
         with:
           url: "${{ secrets.GENURL }}/cleanzip"
           method: 'POST'
@@ -100,7 +100,7 @@ jobs:
           data: '{"uuid": "${{ env.uuid }}"}'
 
       - name: Export GitHub Actions cache environment variables
-        uses: actions/github-script@v6
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
         with:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
@@ -108,7 +108,7 @@ jobs:
 
       - name: Checkout source code
         if: ${{ env.VERSION != 'master' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
             repository: rustdesk/rustdesk
             ref: refs/tags/${{ env.VERSION }}
@@ -116,7 +116,7 @@ jobs:
   
       - name: Checkout source code
         if: ${{ env.VERSION == 'master' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
             repository: rustdesk/rustdesk
             submodules: recursive
@@ -253,16 +253,16 @@ jobs:
           grep -nE "RENDEZVOUS_PORT|RELAY_PORT|WS_" ./libs/hbb_common/src/config.rs
 
       - name: allow custom.txt
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08 # v3
         with:
           timeout_minutes: 5
           max_attempts: 3
           retry_wait_seconds: 15
           shell: bash
           command: |
-            wget https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/allowCustom.py
+            wget https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/allowCustom.py
             python allowCustom.py
-            wget https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/removeSetupServerTip.diff
+            wget https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/removeSetupServerTip.diff
             git apply removeSetupServerTip.diff
             # sed -i '/intl:/a \ \ archive: ^3.6.1' ./flutter/pubspec.yaml
           
@@ -288,7 +288,7 @@ jobs:
           nasm --version
 
       - name: Install flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: "stable"
           flutter-version: ${{ env.FLUTTER_VERSION }}
@@ -308,13 +308,13 @@ jobs:
           grep -n '_setFramesEnabledState(false);' ../packages/flutter/lib/src/scheduler/binding.dart
         
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
             toolchain: ${{ env.MAC_RUST_VERSION }}
             targets: ${{ matrix.job.target }}
             components: "rustfmt"
   
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           prefix-key: ${{ matrix.job.os }}
 
@@ -479,14 +479,14 @@ jobs:
         continue-on-error: true
         if: env.xOffline == 'true'
         run: |
-          wget https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/xoffline.diff
+          wget https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/xoffline.diff
           git apply xoffline.diff
 
       - name: hide-cm
         continue-on-error: true
         if: env.hidecm == 'true'
         run: |
-          wget https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/hidecm.diff
+          wget https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/hidecm.diff
           git apply hidecm.diff
 
       - name: removeNewVersionNotif
@@ -497,13 +497,13 @@ jobs:
           sed -i '/let (request, url) =/,/Ok(())/{/Ok(())/!d}' ./src/common.rs
 
       - name: Restore bridge files
-        uses: actions/download-artifact@master
+        uses: actions/download-artifact@2a5974104b6d5dbdb2f9468a3e54da3bdd241578 # master
         with:
           name: bridge-artifact
           path: ./
 
       - name: Setup vcpkg with Github Actions binary cache
-        uses: lukka/run-vcpkg@v11
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
         with:
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
           doNotCache: false
@@ -773,6 +773,6 @@ jobs:
     if: always()
     steps:
       - name: Delete secrets artifact
-        uses: geekyeggo/delete-artifact@v5
+        uses: geekyeggo/delete-artifact@f275313e70c08f6120db482d7a6b98377786765b # v5
         with:
           name: encrypted-secrets-zip

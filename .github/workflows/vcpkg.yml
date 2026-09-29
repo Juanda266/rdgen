@@ -29,7 +29,7 @@ jobs:
           echo "C:\Program Files\NASM" >> $GITHUB_PATH
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Clone RustDesk overlays
         run: |
@@ -44,7 +44,7 @@ jobs:
         shell: bash
 
       - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
         with:
           vcpkgDirectory: ${{ github.workspace }}/vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
@@ -60,7 +60,7 @@ jobs:
         shell: bash
 
       - name: Upload Installed Dependencies
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: vcpkg-export-${{ matrix.job.vcpkg-triplet }}
           path: ${{ github.workspace }}/installed/

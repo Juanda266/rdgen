@@ -39,3 +39,17 @@ urlpatterns = [
     url(r'^api/generate$',api_views.api_generate),
     url(r'^api/status$',api_views.api_status),
 ]
+
+# JUSTECNO: rutas que llama GitHub Actions, montadas bajo un prefijo secreto (CALLBACK_PREFIX).
+# Cloudflare Access protege todo el host con login; solo /<prefijo>/ y /get_zip quedan sin login.
+import os as _os, re as _re
+_cb = _os.environ.get('CALLBACK_PREFIX', '').strip('/')
+if _cb:
+    _p = _re.escape(_cb)
+    urlpatterns += [
+        url(rf'^{_p}/updategh', views.update_github_run),
+        url(rf'^{_p}/cleanzip', views.cleanup_secrets),
+        url(rf'^{_p}/get_zip', views.get_zip),
+        url(rf'^{_p}/get_png', views.get_png),
+        url(rf'^{_p}/save_custom_client', views.save_custom_client),
+    ]

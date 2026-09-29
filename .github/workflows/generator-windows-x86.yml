@@ -72,9 +72,9 @@ jobs:
           # - { target: aarch64-pc-windows-msvc, os: windows-2022 }
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: encrypted-secrets-zip
 
@@ -86,7 +86,7 @@ jobs:
       - name: Finalize and Cleanup zip/json
         if: always() # Run even if previous steps fail
         continue-on-error: true
-        uses: fjogeleit/http-request-action@v1
+        uses: fjogeleit/http-request-action@c0b95d02a088b47c1f2f4db04fd8af8bd19eee54 # v1
         with:
           url: "${{ secrets.GENURL }}/cleanzip"
           method: 'POST'
@@ -94,7 +94,7 @@ jobs:
           data: '{"uuid": "${{ env.uuid }}"}'
 
       - name: Export GitHub Actions cache environment variables
-        uses: actions/github-script@v6
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
         with:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
@@ -112,7 +112,7 @@ jobs:
 
       - name: Checkout source code
         if: ${{ env.VERSION != 'master' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: rustdesk/rustdesk
           ref: refs/tags/${{ env.VERSION }}
@@ -120,7 +120,7 @@ jobs:
 
       - name: Checkout source code
         if: ${{ env.VERSION == 'master' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: rustdesk/rustdesk
           submodules: recursive
@@ -253,7 +253,7 @@ jobs:
           sed -i -e 's|<span>{translate("Ready")}, <span .link #setup-server>{translate("setup_server_tip")}</span></span>|translate("Ready")|' ./src/ui/index.tis
 
       - name: allow custom.txt
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08 # v3
         with:
           timeout_minutes: 5
           max_attempts: 3
@@ -261,11 +261,11 @@ jobs:
           shell: pwsh
           continue_on_error: true
           command: |
-            Invoke-WebRequest -Uri https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/allowCustom.diff -OutFile allowCustom.diff
+            Invoke-WebRequest -Uri https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/allowCustom.diff -OutFile allowCustom.diff
             git apply allowCustom.diff
 
       - name: Install LLVM and Clang
-        uses: KyleMayes/install-llvm-action@v1
+        uses: KyleMayes/install-llvm-action@1a3da29f56261a1e1f937ec88f0856a9b8321d7e # v1
         with:
           version: ${{ env.LLVM_VERSION }}
 
@@ -275,12 +275,12 @@ jobs:
           rustup target add ${{ matrix.job.target }} --toolchain nightly-2023-10-13-x86_64-pc-windows-msvc
           rustup default nightly-2023-10-13-x86_64-pc-windows-msvc
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           prefix-key: ${{ matrix.job.os }}-sciter
 
       - name: Setup vcpkg with Github Actions binary cache
-        uses: lukka/run-vcpkg@v11
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
         with:
           vcpkgDirectory: C:\vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
@@ -326,7 +326,7 @@ jobs:
 
       - name: magick stuff
         if: ${{ env.iconlink_url != 'false' }}
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08 # v3
         with:
           timeout_minutes: 5
           max_attempts: 3
@@ -552,6 +552,6 @@ jobs:
     if: always()
     steps:
       - name: Delete secrets artifact
-        uses: geekyeggo/delete-artifact@v5
+        uses: geekyeggo/delete-artifact@f275313e70c08f6120db482d7a6b98377786765b # v5
         with:
           name: encrypted-secrets-zip
