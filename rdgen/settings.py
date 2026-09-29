@@ -20,15 +20,31 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get('SECRET_KEY','django-insecure-!(t-!f#6g#sr%yfded9(xha)g+=!6craeez^cp+*&bz_7vdk61')
+def _secret(name, default=''):
+    """JUSTECNO: lee NAME_FILE (archivo, p. ej. secreto de Docker) o, si no existe, la variable NAME.
+    Así los secretos no quedan en variables de entorno del contenedor."""
+    path = os.environ.get(name + '_FILE')
+    if path:
+        try:
+            with open(path) as fh:
+                return fh.read().strip()
+        except OSError:
+            pass
+    return os.environ.get(name, default)
+
+SECRET_KEY = _secret('SECRET_KEY','django-insecure-!(t-!f#6g#sr%yfded9(xha)g+=!6craeez^cp+*&bz_7vdk61')
 GHUSER = os.environ.get("GHUSER", '')
-GHBEARER = os.environ.get("GHBEARER", '')
-GENURL = os.environ.get("GENURL", '')
+GHBEARER = _secret("GHBEARER", '')
 GHBRANCH = os.environ.get("GHBRANCH",'master')
-ZIP_PASSWORD = os.environ.get("ZIP_PASSWORD",'insecure')
+ZIP_PASSWORD = _secret("ZIP_PASSWORD",'insecure')
 PROTOCOL = os.environ.get("PROTOCOL", 'https')
 REPONAME = os.environ.get("REPONAME", 'rdgen')
-SH_SECRET = os.environ.get('SH_SECRET', 'secret')
+SH_SECRET = _secret('SH_SECRET', 'secret')
+# JUSTECNO: GENURL = GENURL_BASE + '/' + CALLBACK_PREFIX (ruta secreta para GitHub Actions)
+CALLBACK_PREFIX = _secret('CALLBACK_PREFIX', '').strip('/')
+GENURL = os.environ.get("GENURL", '')
+if not GENURL and os.environ.get('GENURL_BASE') and CALLBACK_PREFIX:
+    GENURL = os.environ['GENURL_BASE'].rstrip('/') + '/' + CALLBACK_PREFIX
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
@@ -90,7 +106,7 @@ WSGI_APPLICATION = 'rdgen.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'NAME': os.environ.get('RDGEN_DB_PATH', BASE_DIR / 'db.sqlite3'),  # JUSTECNO: DB fuera del código
     }
 }
 

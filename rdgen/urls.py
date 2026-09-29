@@ -42,8 +42,9 @@ urlpatterns = [
 
 # JUSTECNO: rutas que llama GitHub Actions, montadas bajo un prefijo secreto (CALLBACK_PREFIX).
 # Cloudflare Access protege todo el host con login; solo /<prefijo>/ y /get_zip quedan sin login.
-import os as _os, re as _re
-_cb = _os.environ.get('CALLBACK_PREFIX', '').strip('/')
+import re as _re
+from django.conf import settings as _settings
+_cb = _settings.CALLBACK_PREFIX
 if _cb:
     _p = _re.escape(_cb)
     urlpatterns += [
