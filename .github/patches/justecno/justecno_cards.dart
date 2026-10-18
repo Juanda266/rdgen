@@ -3,8 +3,11 @@
 // flutter/lib/desktop/widgets/justecno_cards.dart y fija kJustecnoBuild.
 //
 // - JustecnoUpdateCard: consulta app-api/v1/version al iniciar y cada 24 h; si hay un
-//   "build" mayor que el propio, muestra un aviso que solo abre la página de
-//   descarga (no descarga ni instala nada).
+//   "build" mayor que el propio, muestra un aviso. En Windows, con la app instalada,
+//   el botón "Instalar" descarga el .exe de soporte.justecno.com/descargas/, comprueba
+//   su SHA-256 con el de version.json y lo ejecuta con "--update" pidiendo permiso a
+//   Windows (UAC): es el mismo instalador interno de RustDesk, que conserva ID y ajustes.
+//   Si algo falla, queda el botón para abrir la página de descarga.
 // - JustecnoAliasCard: el cliente escribe su nombre y se guarda en la libreta
 //   compartida del servidor (rustdesk.justecno.com/app-api/v1/alias).
 // Ambas fallan en silencio sin red: nunca bloquean la app.
@@ -25,6 +28,7 @@ const String _kVersionUrl =
     'https://rustdesk.justecno.com/app-api/v1/version';
 const String _kAliasUrl = 'https://rustdesk.justecno.com/app-api/v1/alias';
 const String _kDefaultPage = 'https://soporte.justecno.com/soporte/';
+const String _kDownloadBase = 'https://soporte.justecno.com/descargas/';
 const Duration _kTimeout = Duration(seconds: 15);
 const Color _kBlue = Color(0xFF2F65BA);
 
@@ -79,12 +83,22 @@ class JustecnoUpdateCard extends StatefulWidget {
 }
 
 class _JustecnoUpdateCardState extends State<JustecnoUpdateCard> {
+  static final _archivoOk = RegExp(r'^windows/[A-Za-z0-9._-]+\.exe$');
+  static final _shaOk = RegExp(r'^[0-9a-f]{64}$');
+
   Timer? _first;
   Timer? _daily;
   String _version = '';
   String _page = _kDefaultPage;
+  String _archivo = '';
+  String _sha = '';
+  int _size = 0;
   bool _available = false;
   bool _closed = false;
+  bool _installing = false;
+  double? _progress;
+  String _status = '';
+  bool _statusIsError = false;
 
   @override
   void initState() {
@@ -101,6 +115,7 @@ class _JustecnoUpdateCardState extends State<JustecnoUpdateCard> {
   }
 
   Future<void> _check() async {
+    if (_installing) return;
     try {
       final resp = await http
           .get(Uri.parse(_kVersionUrl), headers: await _headers())
@@ -116,15 +131,154 @@ class _JustecnoUpdateCardState extends State<JustecnoUpdateCard> {
       if (build is! int) return;
       final page = data['pagina'];
       final version = plat['version'];
+      final archivo = plat['archivo'];
+      final sha = plat['sha256'];
+      final size = plat['tamano'];
       if (!mounted) return;
       setState(() {
         _available = build > kJustecnoBuild;
         _version = version is String ? version : '';
         if (page is String && page.startsWith('https://')) _page = page;
+        _archivo = archivo is String ? archivo : '';
+        _sha = sha is String ? sha.toLowerCase() : '';
+        _size = size is int ? size : 0;
       });
     } catch (_) {
       // Sin red o JSON inválido: no se muestra nada.
     }
+  }
+
+  bool get _canInstall {
+    if (!Platform.isWindows) return false;
+    if (!_archivoOk.hasMatch(_archivo) || !_shaOk.hasMatch(_sha)) return false;
+    try {
+      return bind.mainIsInstalled();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _setStatus(String status, {bool error = false, double? progress}) {
+    if (!mounted) return;
+    setState(() {
+      _status = status;
+      _statusIsError = error;
+      _progress = progress;
+    });
+  }
+
+  Future<File> _download() async {
+    final dir = Directory(
+        '${Directory.systemTemp.path}${Platform.pathSeparator}SoporteJUSTECNO-actualizacion');
+    if (await dir.exists()) await dir.delete(recursive: true);
+    await dir.create(recursive: true);
+    final file =
+        File('${dir.path}${Platform.pathSeparator}Soporte-JUSTECNO.exe');
+    final headers = await _headers();
+    headers['Accept'] = '*/*';
+    final client = http.Client();
+    try {
+      final req = http.Request('GET', Uri.parse('$_kDownloadBase$_archivo'))
+        ..headers.addAll(headers);
+      final resp = await client.send(req).timeout(_kTimeout);
+      if (resp.statusCode != 200) {
+        throw Exception('HTTP ${resp.statusCode}');
+      }
+      final total = resp.contentLength ?? _size;
+      final sink = file.openWrite();
+      var got = 0;
+      var shown = -1;
+      try {
+        await for (final chunk
+            in resp.stream.timeout(const Duration(seconds: 60))) {
+          sink.add(chunk);
+          got += chunk.length;
+          if (total > 0) {
+            final pct = got * 100 ~/ total;
+            if (pct != shown) {
+              shown = pct;
+              _setStatus('Descargando… $pct %', progress: got / total);
+            }
+          }
+        }
+      } finally {
+        await sink.close();
+      }
+      if (_size > 0 && got != _size) {
+        throw Exception('tamaño inesperado');
+      }
+      return file;
+    } finally {
+      client.close();
+    }
+  }
+
+  // SHA-256 con certutil (viene en Windows); los argumentos van sin shell.
+  Future<String> _sha256(File file) async {
+    final r = await Process.run('certutil', ['-hashfile', file.path, 'SHA256']);
+    if (r.exitCode != 0) return '';
+    for (final line in r.stdout.toString().split(RegExp(r'\r?\n'))) {
+      final hex = line.replaceAll(' ', '').trim().toLowerCase();
+      if (_shaOk.hasMatch(hex)) return hex;
+    }
+    return '';
+  }
+
+  Future<void> _install() async {
+    setState(() {
+      _installing = true;
+      _status = 'Descargando…';
+      _statusIsError = false;
+      _progress = null;
+    });
+    try {
+      final file = await _download();
+      _setStatus('Comprobando el archivo…');
+      if (await _sha256(file) != _sha) {
+        try {
+          await file.delete();
+        } catch (_) {}
+        throw Exception('el archivo no coincide');
+      }
+      _setStatus('Windows te pedirá permiso: pulsa "Sí" para instalar.');
+      final ruta = file.path.replaceAll("'", "''");
+      final r = await Process.run('powershell', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-WindowStyle',
+        'Hidden',
+        '-Command',
+        "Start-Process -FilePath '$ruta' -ArgumentList '--update' -Verb RunAs"
+      ]);
+      if (r.exitCode != 0) {
+        if (!mounted) return;
+        setState(() {
+          _installing = false;
+          _status = 'No se instaló: Windows no dio el permiso. '
+              'Puedes intentarlo de nuevo cuando quieras.';
+          _statusIsError = true;
+          _progress = null;
+        });
+        return;
+      }
+      _setStatus('Instalando… la app se cerrará y se abrirá sola en unos '
+          'segundos con la versión nueva.');
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _installing = false;
+        _status = 'No se pudo descargar la actualización. Revisa tu conexión '
+            'o descárgala desde la página.';
+        _statusIsError = true;
+        _progress = null;
+      });
+    }
+  }
+
+  Future<void> _openPage() async {
+    try {
+      await launchUrl(Uri.parse(_page), mode: LaunchMode.externalApplication);
+    } catch (_) {}
   }
 
   @override
@@ -133,7 +287,8 @@ class _JustecnoUpdateCardState extends State<JustecnoUpdateCard> {
     final title = _version.isNotEmpty
         ? 'Nueva versión de Soporte JUSTECNO disponible (versión $_version)'
         : 'Nueva versión de Soporte JUSTECNO disponible';
-    return _card(context, [
+    final canInstall = _canInstall;
+    final children = <Widget>[
       Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -142,25 +297,58 @@ class _JustecnoUpdateCardState extends State<JustecnoUpdateCard> {
                 style:
                     const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
           ),
-          InkWell(
-            onTap: () => setState(() => _closed = true),
-            child: const Icon(Icons.close, size: 16),
-          ),
+          if (!_installing)
+            InkWell(
+              onTap: () => setState(() => _closed = true),
+              child: const Icon(Icons.close, size: 16),
+            ),
         ],
       ),
-      const SizedBox(height: 10),
-      ElevatedButton(
-        style: ElevatedButton.styleFrom(
-            backgroundColor: _kBlue, foregroundColor: Colors.white),
-        onPressed: () async {
-          try {
-            await launchUrl(Uri.parse(_page),
-                mode: LaunchMode.externalApplication);
-          } catch (_) {}
-        },
-        child: const Text('Ir a la página de descarga'),
-      ),
-    ]);
+    ];
+    if (canInstall && !_installing && _status.isEmpty) {
+      children.addAll([
+        const SizedBox(height: 6),
+        const Text(
+            'Se instala sobre la actual y conservas tu ID y tus ajustes. '
+            'Si un técnico está conectado, la conexión se cortará unos segundos.',
+            style: TextStyle(fontSize: 12)),
+      ]);
+    }
+    if (_status.isNotEmpty) {
+      children.addAll([
+        const SizedBox(height: 8),
+        Text(_status,
+            style: TextStyle(
+                fontSize: 12,
+                color: _statusIsError ? Colors.red : null)),
+      ]);
+    }
+    if (_installing) {
+      children.addAll([
+        const SizedBox(height: 8),
+        LinearProgressIndicator(value: _progress),
+      ]);
+    } else {
+      children.addAll([
+        const SizedBox(height: 10),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(
+              backgroundColor: _kBlue, foregroundColor: Colors.white),
+          onPressed: canInstall ? _install : _openPage,
+          child: Text(canInstall ? 'Instalar' : 'Ir a la página de descarga'),
+        ),
+      ]);
+      if (canInstall) {
+        children.add(Align(
+          alignment: Alignment.centerRight,
+          child: TextButton(
+            onPressed: _openPage,
+            child: const Text('Descargar desde la página'),
+          ),
+        ));
+      }
+    }
+    return _card(context, children);
   }
 }
 
