@@ -40,11 +40,11 @@ env:
   SIGN_BASE_URL: "${{ secrets.SIGN_BASE_URL }}"
   STATUS_URL: "${{ secrets.GENURL }}/updategh"
   # Soporte JUSTECNO: tarjetas propias (aviso de nueva versión + nombre para el técnico).
-  # Solo se aplican a la app con este nombre. Sube JUSTECNO_BUILD en cada versión publicada
-  # y pon el mismo número en /srv/descargas/version.json (la app lo lee en
-  # https://rustdesk.justecno.com/app-api/v1/version).
+  # Solo se aplican a la app con este nombre. JUSTECNO_BUILD es el número de ejecución
+  # (siempre sube); justecno-actualizador lo pone en /srv/descargas/version.json al publicar
+  # (la app lo lee en https://rustdesk.justecno.com/app-api/v1/version).
   JUSTECNO_APPNAME: "Soporte JUSTECNO"
-  JUSTECNO_BUILD: "1"
+  JUSTECNO_BUILD: "${{ github.run_number }}"
 
 
 jobs:
