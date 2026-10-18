@@ -39,6 +39,12 @@ env:
   UPLOAD_ARTIFACT: 'true'
   SIGN_BASE_URL: "${{ secrets.SIGN_BASE_URL }}"
   STATUS_URL: "${{ secrets.GENURL }}/updategh"
+  # Soporte JUSTECNO: tarjetas propias (aviso de nueva versión + nombre para el técnico).
+  # Solo se aplican a la app con este nombre. Sube JUSTECNO_BUILD en cada versión publicada
+  # y pon el mismo número en /srv/descargas/version.json (la app lo lee en
+  # https://rustdesk.justecno.com/app-api/v1/version).
+  JUSTECNO_APPNAME: "Soporte JUSTECNO"
+  JUSTECNO_BUILD: "1"
 
 
 jobs:
@@ -124,6 +130,11 @@ jobs:
         if: ${{ env.rdgen == 'false' }}
         run: |
           echo "STATUS_URL=${{ env.apiServer }}/api/updategh" >> $env:GITHUB_ENV
+
+      # El checkout de rustdesk reemplaza este repo: guarda antes los parches propios.
+      - name: save justecno patches
+        shell: bash
+        run: cp -r ./.github/patches/justecno "$RUNNER_TEMP/justecno"
 
       - name: Checkout source code
         if: ${{ env.VERSION != 'master' }}
@@ -378,6 +389,23 @@ jobs:
                       print("Successfully patched MSI CustomAction printer port")
                   else:
                       print("Warning: RD_PRINTER_PORT not matched in RemotePrinter.cpp")
+
+      - name: justecno cards
+        if: env.appname == env.JUSTECNO_APPNAME
+        shell: bash
+        run: |
+          set -euo pipefail
+          home=./flutter/lib/desktop/pages/desktop_home_page.dart
+          cards=./flutter/lib/desktop/widgets/justecno_cards.dart
+          cp "$RUNNER_TEMP/justecno/justecno_cards.dart" "$cards"
+          sed -i -e "s|^const int kJustecnoBuild = 0;|const int kJustecnoBuild = $JUSTECNO_BUILD;|" "$cards"
+          grep -q "^const int kJustecnoBuild = $JUSTECNO_BUILD;" "$cards"
+          # Falla a propósito si una versión nueva de RustDesk cambia estas líneas.
+          grep -q "^import '../widgets/button.dart';" "$home"
+          grep -q "^ *if (!isOutgoingOnly) buildPasswordBoard(context),$" "$home"
+          sed -i -e "s|^import '../widgets/button.dart';|&\nimport '../widgets/justecno_cards.dart';|" "$home"
+          sed -i -e "s|^\( *\)if (!isOutgoingOnly) buildPasswordBoard(context),$|&\n\1const JustecnoAliasCard(),\n\1const JustecnoUpdateCard(),|" "$home"
+          grep -n "justecno_cards\|JustecnoAliasCard\|JustecnoUpdateCard" "$home"
 
       - name: Install LLVM and Clang
         uses: KyleMayes/install-llvm-action@v1
