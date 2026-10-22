@@ -43,7 +43,8 @@ env:
   # Solo se aplican a la app con este nombre. JUSTECNO_BUILD es el número de ejecución
   # (siempre sube); justecno-actualizador lo pone en /srv/descargas/version.json al publicar
   # (la app lo lee en https://rustdesk.justecno.com/app-api/v1/version).
-  JUSTECNO_APPNAME: "Soporte JUSTECNO"
+  # RustDesk 1.5 solo instala apps cuyo nombre sea [a-zA-Z0-9-]+ (sin espacios).
+  JUSTECNO_APPNAME: "JUSTECNO"
   JUSTECNO_BUILD: "${{ github.run_number }}"
 
 
