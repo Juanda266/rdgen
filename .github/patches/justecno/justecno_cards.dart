@@ -8,8 +8,9 @@
 //   su SHA-256 con el de version.json y lo ejecuta con "--update" pidiendo permiso a
 //   Windows (UAC): es el mismo instalador interno de RustDesk, que conserva ID y ajustes.
 //   Si algo falla, queda el botón para abrir la página de descarga.
-// - JustecnoAliasCard: el cliente escribe su nombre y se guarda en la libreta
-//   compartida del servidor (rustdesk.justecno.com/app-api/v1/alias).
+// - JustecnoAliasCard: el cliente escribe su nombre completo y un usuario único; se guardan
+//   en la libreta compartida del servidor (rustdesk.justecno.com/app-api/v1/alias) como
+//   "Nombre completo (usuario)". Si otro equipo ya tiene ese usuario: "Nombre de usuario ocupado".
 // Ambas fallan en silencio sin red: nunca bloquean la app.
 
 import 'dart:async';
@@ -364,15 +365,22 @@ class JustecnoAliasCard extends StatefulWidget {
 }
 
 class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
-  final _controller = TextEditingController();
+  // Mismas reglas que el servidor (app-api/v1/alias)
+  static final _usuarioOk = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{2,29}$');
+
+  final _nombre = TextEditingController();
+  final _usuario = TextEditingController();
   Timer? _retry;
   int _retries = 0;
-  String _alias = '';
+  String _nombreGuardado = '';
+  String _usuarioGuardado = '';
   bool _loaded = false;
   bool _editing = false;
   bool _saving = false;
   String _message = '';
   bool _messageIsError = false;
+  String? _errorNombre;
+  String? _errorUsuario;
 
   @override
   void initState() {
@@ -383,7 +391,8 @@ class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
   @override
   void dispose() {
     _retry?.cancel();
-    _controller.dispose();
+    _nombre.dispose();
+    _usuario.dispose();
     super.dispose();
   }
 
@@ -407,6 +416,8 @@ class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
     _retry = Timer(const Duration(minutes: 1), _load);
   }
 
+  String _texto(dynamic v) => v is String ? v : '';
+
   Future<void> _load() async {
     final ids = await _ids();
     if (ids == null) {
@@ -419,12 +430,15 @@ class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
           await http.get(uri, headers: await _headers()).timeout(_kTimeout);
       final data = jsonDecode(utf8.decode(resp.bodyBytes));
       if (resp.statusCode == 200 && data is Map && data['ok'] == true) {
-        final alias = data['alias'] is String ? data['alias'] as String : '';
         if (!mounted) return;
         setState(() {
-          _alias = alias;
+          _nombreGuardado = _texto(data['nombre']);
+          _usuarioGuardado = _texto(data['usuario']);
           _loaded = true;
-          if (!_editing) _controller.text = alias;
+          if (!_editing) {
+            _nombre.text = _nombreGuardado;
+            _usuario.text = _usuarioGuardado;
+          }
         });
         return;
       }
@@ -433,17 +447,29 @@ class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
   }
 
   Future<void> _save() async {
-    final alias = _controller.text.trim();
-    if (alias.length < 2 || alias.length > 40) {
+    final nombre = _nombre.text.trim().split(RegExp(r'\s+')).join(' ');
+    final usuario = _usuario.text.trim();
+    String? errNombre;
+    String? errUsuario;
+    if (nombre.length < 3 || nombre.length > 60) {
+      errNombre = 'Escribe tu nombre completo';
+    }
+    if (!_usuarioOk.hasMatch(usuario)) {
+      errUsuario = 'De 3 a 30 letras o números, sin espacios (puedes usar . _ -)';
+    }
+    if (errNombre != null || errUsuario != null) {
       setState(() {
-        _message = 'El nombre debe tener entre 2 y 40 caracteres.';
-        _messageIsError = true;
+        _errorNombre = errNombre;
+        _errorUsuario = errUsuario;
+        _message = '';
       });
       return;
     }
     setState(() {
       _saving = true;
       _message = '';
+      _errorNombre = null;
+      _errorUsuario = null;
     });
     final ids = await _ids();
     var message = 'No se pudo guardar. Revisa tu conexión e inténtalo de nuevo.';
@@ -453,20 +479,28 @@ class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
         final resp = await http
             .post(Uri.parse(_kAliasUrl),
                 headers: await _headers(json: true),
-                body: jsonEncode({...ids, 'alias': alias}))
+                body: jsonEncode({...ids, 'usuario': usuario, 'nombre': nombre}))
             .timeout(_kTimeout);
         final data = jsonDecode(utf8.decode(resp.bodyBytes));
         if (resp.statusCode == 200 && data is Map && data['ok'] == true) {
-          final saved =
-              data['alias'] is String ? data['alias'] as String : alias;
           isError = false;
-          message = 'Guardado. El técnico te verá como "$saved".';
-          _alias = saved;
+          _nombreGuardado = _texto(data['nombre']).isNotEmpty ? _texto(data['nombre']) : nombre;
+          _usuarioGuardado = _texto(data['usuario']).isNotEmpty ? _texto(data['usuario']) : usuario;
+          message = 'Guardado. El técnico te encontrará como "$_nombreGuardado".';
           _loaded = true;
           _editing = false;
           _retry?.cancel();
         } else if (data is Map && data['error'] is String) {
-          message = data['error'] as String;
+          final error = data['error'] as String;
+          if (data['campo'] == 'usuario') {
+            _errorUsuario = error;
+            message = '';
+          } else if (data['campo'] == 'nombre') {
+            _errorNombre = error;
+            message = '';
+          } else {
+            message = error;
+          }
         }
       } catch (_) {}
     }
@@ -478,57 +512,101 @@ class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
     });
   }
 
+  InputDecoration _campo(String hint, String? error, {String? ayuda}) {
+    return InputDecoration(
+      isDense: true,
+      counterText: '',
+      hintText: hint,
+      helperText: ayuda,
+      helperMaxLines: 2,
+      errorText: error,
+      errorMaxLines: 2,
+      border: const OutlineInputBorder(),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final showForm = _alias.isEmpty || _editing;
+    final yaGuardado = _usuarioGuardado.isNotEmpty && _nombreGuardado.isNotEmpty;
+    final showForm = !yaGuardado || _editing;
     final children = <Widget>[
-      const Text('Tu nombre para el técnico',
+      const Text('Tus datos para el técnico',
           style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
       const SizedBox(height: 6),
     ];
     if (showForm) {
-      if (_alias.isEmpty) {
-        children.add(Text(
-            _loaded
-                ? 'Escribe tu nombre (por ejemplo "Juan Pérez - Oficina") '
-                    'para que el técnico te reconozca. Es opcional.'
-                : 'Escribe tu nombre para que el técnico te reconozca. '
-                    'Es opcional.',
-            style: const TextStyle(fontSize: 12)));
+      if (!yaGuardado) {
+        children.add(const Text(
+            'Así el técnico te encuentra más rápido. Tu usuario es único: nadie más podrá usarlo.',
+            style: TextStyle(fontSize: 12)));
       }
       children.addAll([
-        const SizedBox(height: 6),
+        const SizedBox(height: 8),
+        const Text('Nombre completo', style: TextStyle(fontSize: 12)),
+        const SizedBox(height: 4),
         TextField(
-          controller: _controller,
-          maxLength: 40,
+          controller: _nombre,
+          maxLength: 60,
           enabled: !_saving,
+          textCapitalization: TextCapitalization.words,
           style: const TextStyle(fontSize: 13),
-          decoration: const InputDecoration(
-            isDense: true,
-            counterText: '',
-            hintText: 'Nombre - Lugar',
-            border: OutlineInputBorder(),
-          ),
+          decoration: _campo('Juan Pérez Gómez', _errorNombre),
           onSubmitted: (_) => _save(),
         ),
         const SizedBox(height: 8),
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(
-              backgroundColor: _kBlue, foregroundColor: Colors.white),
-          onPressed: _saving ? null : _save,
-          child: Text(_saving ? 'Guardando…' : 'Guardar'),
+        const Text('Usuario', style: TextStyle(fontSize: 12)),
+        const SizedBox(height: 4),
+        TextField(
+          controller: _usuario,
+          maxLength: 30,
+          enabled: !_saving,
+          autocorrect: false,
+          style: const TextStyle(fontSize: 13),
+          decoration: _campo('juanperez', _errorUsuario,
+              ayuda: 'Sin espacios. Puedes usar letras, números y . _ -'),
+          onSubmitted: (_) => _save(),
         ),
+        const SizedBox(height: 10),
+        Row(children: [
+          Expanded(
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: _kBlue, foregroundColor: Colors.white),
+              onPressed: _saving ? null : _save,
+              child: Text(_saving ? 'Guardando…' : 'Guardar'),
+            ),
+          ),
+          if (_editing) ...[
+            const SizedBox(width: 8),
+            TextButton(
+              onPressed: _saving
+                  ? null
+                  : () => setState(() {
+                        _editing = false;
+                        _errorNombre = null;
+                        _errorUsuario = null;
+                        _message = '';
+                        _nombre.text = _nombreGuardado;
+                        _usuario.text = _usuarioGuardado;
+                      }),
+              child: const Text('Cancelar'),
+            ),
+          ],
+        ]),
       ]);
     } else {
       children.addAll([
-        Text(_alias, style: const TextStyle(fontSize: 13)),
+        Text(_nombreGuardado, style: const TextStyle(fontSize: 13)),
+        Text('Usuario: $_usuarioGuardado',
+            style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor)),
         Align(
           alignment: Alignment.centerRight,
           child: TextButton(
             onPressed: () => setState(() {
               _editing = true;
               _message = '';
-              _controller.text = _alias;
+              _nombre.text = _nombreGuardado;
+              _usuario.text = _usuarioGuardado;
             }),
             child: const Text('Cambiar'),
           ),
