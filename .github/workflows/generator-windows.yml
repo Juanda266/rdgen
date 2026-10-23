@@ -45,6 +45,8 @@ env:
   # (la app lo lee en https://rustdesk.justecno.com/app-api/v1/version).
   # RustDesk 1.5 solo instala apps cuyo nombre sea [a-zA-Z0-9-]+ (sin espacios).
   JUSTECNO_APPNAME: "JUSTECNO"
+  # App de los técnicos (solo controla): lleva solo el aviso de nueva versión.
+  JUSTECNO_APPNAME_TECNICO: "JUSTECNO-Tecnico"
   JUSTECNO_BUILD: "${{ github.run_number }}"
 
 
@@ -400,20 +402,27 @@ jobs:
                       print("Warning: RD_PRINTER_PORT not matched in RemotePrinter.cpp")
 
       - name: justecno cards
-        if: env.appname == env.JUSTECNO_APPNAME
+        if: env.appname == env.JUSTECNO_APPNAME || env.appname == env.JUSTECNO_APPNAME_TECNICO
         shell: bash
         run: |
           set -euo pipefail
+          if [ "${{ env.appname }}" = "$JUSTECNO_APPNAME_TECNICO" ]; then
+            variante=tecnicos; tarjetas='\1const JustecnoUpdateCard(),'
+          else
+            variante=clientes; tarjetas='\1const JustecnoAliasCard(),\n\1const JustecnoUpdateCard(),'
+          fi
           home=./flutter/lib/desktop/pages/desktop_home_page.dart
           cards=./flutter/lib/desktop/widgets/justecno_cards.dart
           cp "$RUNNER_TEMP/justecno/justecno_cards.dart" "$cards"
           sed -i -e "s|^const int kJustecnoBuild = 0;|const int kJustecnoBuild = $JUSTECNO_BUILD;|" "$cards"
           grep -q "^const int kJustecnoBuild = $JUSTECNO_BUILD;" "$cards"
+          sed -i -e "s|^const String kJustecnoVariante = 'clientes';|const String kJustecnoVariante = '$variante';|" "$cards"
+          grep -q "^const String kJustecnoVariante = '$variante';" "$cards"
           # Falla a propósito si una versión nueva de RustDesk cambia estas líneas.
           grep -q "^import '../widgets/button.dart';" "$home"
           grep -q "^ *if (!isOutgoingOnly) buildPasswordBoard(context),$" "$home"
           sed -i -e "s|^import '../widgets/button.dart';|&\nimport '../widgets/justecno_cards.dart';|" "$home"
-          sed -i -e "s|^\( *\)if (!isOutgoingOnly) buildPasswordBoard(context),$|&\n\1const JustecnoAliasCard(),\n\1const JustecnoUpdateCard(),|" "$home"
+          sed -i -e "s|^\( *\)if (!isOutgoingOnly) buildPasswordBoard(context),$|&\n$tarjetas|" "$home"
           grep -n "justecno_cards\|JustecnoAliasCard\|JustecnoUpdateCard" "$home"
 
       - name: Install LLVM and Clang
