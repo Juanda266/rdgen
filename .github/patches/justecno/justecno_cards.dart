@@ -1,6 +1,8 @@
 // Tarjetas propias de "Soporte JUSTECNO" para la pantalla principal (escritorio).
 // El workflow generator-windows.yml copia este archivo a
-// flutter/lib/desktop/widgets/justecno_cards.dart y fija kJustecnoBuild.
+// flutter/lib/desktop/widgets/justecno_cards.dart y fija kJustecnoBuild y kJustecnoVariante.
+// La app de técnicos ("JUSTECNO-Tecnico", solo controla) usa únicamente JustecnoUpdateCard y
+// lee su propia versión en soporte.justecno.com/descargas/tecnicos/version.json.
 //
 // - JustecnoUpdateCard: consulta app-api/v1/version al iniciar y cada 24 h; si hay un
 //   "build" mayor que el propio, muestra un aviso. En Windows, con la app instalada,
@@ -25,10 +27,18 @@ import 'package:url_launcher/url_launcher.dart';
 // Número de compilación propio. El workflow lo reemplaza (JUSTECNO_BUILD).
 const int kJustecnoBuild = 0;
 
-const String _kVersionUrl =
-    'https://rustdesk.justecno.com/app-api/v1/version';
+// 'clientes' (Soporte JUSTECNO) o 'tecnicos' (JUSTECNO Técnico). El workflow la reemplaza.
+const String kJustecnoVariante = 'clientes';
+const bool _kTecnicos = kJustecnoVariante == 'tecnicos';
+const String _kNombreApp = _kTecnicos ? 'JUSTECNO Técnico' : 'Soporte JUSTECNO';
+
+const String _kVersionUrl = _kTecnicos
+    ? 'https://soporte.justecno.com/descargas/tecnicos/version.json'
+    : 'https://rustdesk.justecno.com/app-api/v1/version';
 const String _kAliasUrl = 'https://rustdesk.justecno.com/app-api/v1/alias';
-const String _kDefaultPage = 'https://soporte.justecno.com/soporte/';
+const String _kDefaultPage = _kTecnicos
+    ? 'https://soporte.justecno.com/descargas/tecnicos/'
+    : 'https://soporte.justecno.com/soporte/';
 const String _kDownloadBase = 'https://soporte.justecno.com/descargas/';
 const Duration _kTimeout = Duration(seconds: 15);
 const Color _kBlue = Color(0xFF2F65BA);
@@ -84,7 +94,7 @@ class JustecnoUpdateCard extends StatefulWidget {
 }
 
 class _JustecnoUpdateCardState extends State<JustecnoUpdateCard> {
-  static final _archivoOk = RegExp(r'^windows/[A-Za-z0-9._-]+\.exe$');
+  static final _archivoOk = RegExp(r'^(windows|tecnicos)/[A-Za-z0-9._-]+\.exe$');
   static final _shaOk = RegExp(r'^[0-9a-f]{64}$');
 
   Timer? _first;
@@ -286,8 +296,8 @@ class _JustecnoUpdateCardState extends State<JustecnoUpdateCard> {
   Widget build(BuildContext context) {
     if (!_available || _closed) return const SizedBox.shrink();
     final title = _version.isNotEmpty
-        ? 'Nueva versión de Soporte JUSTECNO disponible (versión $_version)'
-        : 'Nueva versión de Soporte JUSTECNO disponible';
+        ? 'Nueva versión de $_kNombreApp disponible (versión $_version)'
+        : 'Nueva versión de $_kNombreApp disponible';
     final canInstall = _canInstall;
     final children = <Widget>[
       Row(
