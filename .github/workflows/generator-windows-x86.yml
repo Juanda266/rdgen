@@ -13,6 +13,11 @@ on:
         required: true
         default: ''
         type: string
+      app_version:
+        description: 'custom app version string (overrides build version)'
+        required: false
+        default: ''
+        type: string
 
 env:
   SCITER_RUST_VERSION: "1.75" # https://github.com/rustdesk/rustdesk/discussions/7503, also 1.78 has ABI change which causes our sciter version not working, https://blog.rust-lang.org/2024/03/30/i128-layout-update.html
@@ -27,7 +32,7 @@ env:
   # for arm64 linux because official Dart SDK does not work
   FLUTTER_ELINUX_VERSION: "3.16.9"
   TAG_NAME: "${{ inputs.upload-tag }}"
-  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  VCPKG_BINARY_SOURCES: "clear"
   # vcpkg version: 2025.08.27
   # If we change the `VCPKG COMMIT_ID`, please remember:
   # 1. Call `$VCPKG_ROOT/vcpkg x-update-baseline` to update the baseline in `vcpkg.json`.
@@ -127,10 +132,11 @@ jobs:
 
       - name: Set custom app version
         continue-on-error: true
-        if: ${{ env.app_version != '' }}
+        if: ${{ inputs.app_version != '' }}
         shell: bash
         run: |
-          sed -i -e 's|^version = ".*"|version = "${{ env.app_version }}"|' ./Cargo.toml
+          sed -i -e 's|^version = ".*"|version = "${{ inputs.app_version }}"|' ./Cargo.toml
+          sed -i '/name = "rustdesk"/ {n; s/version = ".*"/version = "${{ inputs.app_version }}"/}' ./Cargo.lock
           grep '^version = ' ./Cargo.toml
 
       - name: Apply allow_custom_update patch
@@ -298,7 +304,15 @@ jobs:
         with:
           prefix-key: ${{ matrix.job.os }}-sciter
 
-      - name: Setup vcpkg with Github Actions binary cache
+      - name: Restore vcpkg installed cache
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg\installed
+          key: vcpkg-windows-${{ env.VCPKG_COMMIT_ID }}-${{ matrix.job.vcpkg-triplet }}
+          restore-keys: |
+            vcpkg-windows-${{ env.VCPKG_COMMIT_ID }}-
+
+      - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
           vcpkgDirectory: C:\vcpkg
@@ -333,6 +347,13 @@ jobs:
           done
           head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
         shell: bash
+
+      - name: Save vcpkg installed cache
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: C:\vcpkg\installed
+          key: vcpkg-windows-${{ env.VCPKG_COMMIT_ID }}-${{ matrix.job.vcpkg-triplet }}
 
       - name: icon stuff
         if: ${{ env.iconlink_url != 'false' }}

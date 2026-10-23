@@ -13,6 +13,11 @@ on:
         required: true
         default: ''
         type: string
+      app_version:
+        description: 'custom app version string (overrides build version)'
+        required: false
+        default: ''
+        type: string
 
 env:
   SCITER_RUST_VERSION: "1.75" # https://github.com/rustdesk/rustdesk/discussions/7503, also 1.78 has ABI change which causes our sciter version not working, https://blog.rust-lang.org/2024/03/30/i128-layout-update.html
@@ -27,7 +32,7 @@ env:
   FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"  # for arm64 linux because official Dart SDK does not work
   FLUTTER_ELINUX_VERSION: "3.16.9"
   TAG_NAME: "${{ inputs.upload-tag }}"
-  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  VCPKG_BINARY_SOURCES: "clear"
   # vcpkg version: 2024.07.12
   VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
   ARMV7_VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836"
@@ -123,10 +128,11 @@ jobs:
 
       - name: Set custom app version
         continue-on-error: true
-        if: ${{ env.app_version != '' }}
+        if: ${{ inputs.app_version != '' }}
         shell: bash
         run: |
-          sed -i -e 's|^version = ".*"|version = "${{ env.app_version }}"|' ./Cargo.toml
+          sed -i -e 's|^version = ".*"|version = "${{ inputs.app_version }}"|' ./Cargo.toml
+          sed -i '/name = "rustdesk"/ {n; s/version = ".*"/version = "${{ inputs.app_version }}"/}' ./Cargo.lock
           grep '^version = ' ./Cargo.toml
 
       - name: Apply allow_custom_update patch
@@ -521,7 +527,15 @@ jobs:
           name: bridge-artifact
           path: ./
 
-      - name: Setup vcpkg with Github Actions binary cache
+      - name: Restore vcpkg installed cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/installed
+          key: vcpkg-macos-${{ env.VCPKG_COMMIT_ID }}-${{ matrix.job.vcpkg-triplet }}
+          restore-keys: |
+            vcpkg-macos-${{ env.VCPKG_COMMIT_ID }}-
+
+      - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
@@ -542,6 +556,13 @@ jobs:
             exit 1
           fi
           head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
+
+      - name: Save vcpkg installed cache
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ${{ github.workspace }}/installed
+          key: vcpkg-macos-${{ env.VCPKG_COMMIT_ID }}-${{ matrix.job.vcpkg-triplet }}
 
       - name: Create MacOS directory structure
         run: |
