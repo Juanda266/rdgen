@@ -10,6 +10,8 @@ on:
 
 jobs:
   build:
+    # Soporte JUSTECNO: solo en el repositorio original (el fork no publica imágenes)
+    if: github.repository == 'bryangerlach/rdgen'
     runs-on: ubuntu-latest
     steps:
       - name: set docker image tag
