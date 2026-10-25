@@ -813,6 +813,8 @@ jobs:
 
   build-rustdesk-linux-drm:
     needs: [generate-bridge-linux, setup]
+    # Soporte JUSTECNO: no se publica (Wayland desatendido)
+    if: false
     name: build rustdesk linux drm x86_64
     runs-on: ubuntu-22.04
     steps:
