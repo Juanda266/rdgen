@@ -43,6 +43,12 @@ env:
   ANDROID_SIGNING_KEY: "${{ secrets.ANDROID_SIGNING_KEY }}"
   MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
   UPLOAD_ARTIFACT: 'true'
+  # Soporte JUSTECNO: tarjetas propias (aviso de nueva versión + nombre para el técnico), como en
+  # generator-windows.yml. JUSTECNO_BUILD es el número de ejecución de este workflow; justecno-actualizador
+  # lo pone en /srv/descargas/version.json (plataformas.<sistema>.build) al publicar.
+  JUSTECNO_APPNAME: "JUSTECNO"
+  JUSTECNO_APPNAME_TECNICO: "JUSTECNO-Tecnico"
+  JUSTECNO_BUILD: "${{ github.run_number }}"
   SIGN_BASE_URL: "${{ secrets.SIGN_BASE_URL }}"
   STATUS_URL: "${{ secrets.GENURL }}/updategh"
 
@@ -127,6 +133,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y imagemagick
+
+      # El checkout de rustdesk reemplaza este repo: guarda antes los parches propios.
+      - name: save justecno patches
+        shell: bash
+        run: cp -r ./.github/patches/justecno "$RUNNER_TEMP/justecno"
 
       - name: Checkout source code
         if: ${{ env.VERSION != 'master' }}
@@ -436,6 +447,39 @@ jobs:
             wget https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/hidecm.diff
             git apply hidecm.diff
         
+      - name: justecno cards
+        if: env.appname == env.JUSTECNO_APPNAME || env.appname == env.JUSTECNO_APPNAME_TECNICO
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, shutil
+          tecnicos = os.environ["appname"] == os.environ["JUSTECNO_APPNAME_TECNICO"]
+          home = "flutter/lib/desktop/pages/desktop_home_page.dart"
+          cards = "flutter/lib/desktop/widgets/justecno_cards.dart"
+          shutil.copy(os.path.join(os.environ["RUNNER_TEMP"], "justecno", "justecno_cards.dart"), cards)
+          t = open(cards, encoding="utf-8").read()
+          for a, b in (("const int kJustecnoBuild = 0;", "const int kJustecnoBuild = %s;" % int(os.environ["JUSTECNO_BUILD"])),
+                       ("const String kJustecnoVariante = 'clientes';",
+                        "const String kJustecnoVariante = '%s';" % ("tecnicos" if tecnicos else "clientes"))):
+              assert t.count(a) == 1, a
+              t = t.replace(a, b)
+          open(cards, "w", encoding="utf-8").write(t)
+          h = open(home, encoding="utf-8").read()
+          # Falla a propósito si una versión nueva de RustDesk cambia estas líneas.
+          imp = "import '../widgets/button.dart';\n"
+          assert h.count(imp) == 1, imp
+          h = h.replace(imp, imp + "import '../widgets/justecno_cards.dart';\n")
+          m = re.search(r"^( *)if \(!isOutgoingOnly\) buildPasswordBoard\(context\),\n", h, re.M)
+          assert m, "buildPasswordBoard"
+          i = m.group(1)
+          extra = i + "const JustecnoUpdateCard(),\n" if tecnicos else i + "const JustecnoAliasCard(),\n" + i + "const JustecnoUpdateCard(),\n"
+          h = h[:m.end()] + extra + h[m.end():]
+          open(home, "w", encoding="utf-8").write(h)
+          print("tarjetas JUSTECNO:", "tecnicos" if tecnicos else "clientes", "build", os.environ["JUSTECNO_BUILD"])
+          PY
+          grep -n "justecno_cards\|JustecnoAliasCard\|JustecnoUpdateCard" flutter/lib/desktop/pages/desktop_home_page.dart
+
       - name: removeNewVersionNotif
         continue-on-error: true
         if: env.removeNewVersionNotif == 'true'
