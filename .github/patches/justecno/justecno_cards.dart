@@ -13,7 +13,11 @@
 // - JustecnoAliasCard: el cliente escribe su nombre completo y un usuario único; se guardan
 //   en la libreta compartida del servidor (rustdesk.justecno.com/app-api/v1/alias) como
 //   "Nombre completo (usuario)". Si otro equipo ya tiene ese usuario: "Nombre de usuario ocupado".
-// Ambas fallan en silencio sin red: nunca bloquean la app.
+// - JustecnoMantenimiento (va dentro de JustecnoUpdateCard, así sale en las dos apps): lee el
+//   mantenimiento programado en soporte.justecno.com/wp-json/justecno/v1/mantenimiento. Desde 2 días
+//   antes muestra el aviso; en los últimos 30 minutos, la cuenta regresiva. A los 30, 10, 5 y 1 minuto
+//   trae la ventana al frente con un aviso, para que quien está en sesión sepa cuándo se corta.
+// Todas fallan en silencio sin red: nunca bloquean la app.
 
 import 'dart:async';
 import 'dart:convert';
@@ -23,6 +27,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
+import 'package:window_manager/window_manager.dart';
 
 // Número de compilación propio. El workflow lo reemplaza (JUSTECNO_BUILD).
 const int kJustecnoBuild = 0;
@@ -83,17 +88,275 @@ Widget _card(BuildContext context, List<Widget> children) {
 }
 
 // ---------------------------------------------------------------------------
-// Aviso de nueva versión
+// Tarjetas de las dos apps: mantenimiento programado + nueva versión
 // ---------------------------------------------------------------------------
 
-class JustecnoUpdateCard extends StatefulWidget {
+class JustecnoUpdateCard extends StatelessWidget {
   const JustecnoUpdateCard({Key? key}) : super(key: key);
 
   @override
-  State<JustecnoUpdateCard> createState() => _JustecnoUpdateCardState();
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: const [JustecnoMantenimiento(), _JustecnoActualizacion()],
+    );
+  }
 }
 
-class _JustecnoUpdateCardState extends State<JustecnoUpdateCard> {
+// ---------------------------------------------------------------------------
+// Mantenimiento programado del servidor
+// ---------------------------------------------------------------------------
+
+const String _kMantUrl =
+    'https://soporte.justecno.com/wp-json/justecno/v1/mantenimiento';
+const List<int> _kMantAvisos = [30, 10, 5, 1]; // minutos antes: ventana al frente
+const Color _kAmbar = Color(0xFFFFB020);
+const Color _kRojo = Color(0xFFFF6B81);
+
+String _hora(DateTime t) {
+  final l = t.toLocal();
+  final h = l.hour % 12 == 0 ? 12 : l.hour % 12;
+  final m = l.minute.toString().padLeft(2, '0');
+  return '$h:$m ${l.hour < 12 ? 'a. m.' : 'p. m.'}';
+}
+
+String _resta(Duration d) {
+  final seg = d.inSeconds < 0 ? 0 : d.inSeconds;
+  if (seg < 60) return '$seg segundos';
+  final m = (seg + 59) ~/ 60;
+  return m == 1 ? '1 minuto' : '$m minutos';
+}
+
+class JustecnoMantenimiento extends StatefulWidget {
+  const JustecnoMantenimiento({Key? key}) : super(key: key);
+
+  @override
+  State<JustecnoMantenimiento> createState() => _JustecnoMantenimientoState();
+}
+
+class _JustecnoMantenimientoState extends State<JustecnoMantenimiento> {
+  Timer? _consulta;
+  Timer? _reloj;
+  DateTime? _ini;
+  DateTime? _fin;
+  String _mensaje = '';
+  bool _cerrado = false;
+  final Set<String> _avisados = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _consulta = Timer(const Duration(seconds: 8), _revisar);
+    _reloj = Timer.periodic(const Duration(seconds: 1), (_) => _tic());
+  }
+
+  @override
+  void dispose() {
+    _consulta?.cancel();
+    _reloj?.cancel();
+    super.dispose();
+  }
+
+  // Consulta más seguido cuanto más cerca está el mantenimiento
+  void _programar() {
+    _consulta?.cancel();
+    var espera = const Duration(minutes: 30);
+    final ini = _ini;
+    if (ini != null) {
+      final falta = ini.difference(DateTime.now());
+      if (falta < const Duration(hours: 3)) espera = const Duration(minutes: 2);
+    }
+    _consulta = Timer(espera, _revisar);
+  }
+
+  Future<void> _revisar() async {
+    try {
+      final resp = await http
+          .get(Uri.parse(_kMantUrl), headers: await _headers())
+          .timeout(_kTimeout);
+      if (resp.statusCode == 200) {
+        final data = jsonDecode(utf8.decode(resp.bodyBytes));
+        if (data is Map && mounted) {
+          final ini = data['inicio'], fin = data['fin'], msg = data['mensaje'];
+          setState(() {
+            _ini = ini is String ? DateTime.tryParse(ini) : null;
+            _fin = fin is String ? DateTime.tryParse(fin) : null;
+            _mensaje = msg is String ? msg : '';
+          });
+        }
+      }
+    } catch (_) {
+      // Sin red (o con el servidor ya apagado): se queda con lo último que supo.
+    }
+    if (mounted) _programar();
+  }
+
+  // 'anuncio' (2 días antes), 'pronto' (30 min antes), 'activo' o ''
+  String _fase(DateTime ahora) {
+    final ini = _ini, fin = _fin;
+    if (ini == null || fin == null || !ahora.isBefore(fin)) return '';
+    if (!ahora.isBefore(ini)) return 'activo';
+    final falta = ini.difference(ahora);
+    if (falta <= const Duration(minutes: 30)) return 'pronto';
+    return falta <= const Duration(days: 2) ? 'anuncio' : '';
+  }
+
+  void _tic() {
+    if (!mounted) return;
+    final ahora = DateTime.now();
+    final fase = _fase(ahora);
+    if (fase == 'pronto' || fase == 'activo') setState(() {});
+    final ini = _ini;
+    if (fase != 'pronto' || ini == null) return;
+    final faltaMin = ini.difference(ahora).inSeconds / 60.0;
+    final toca = _kMantAvisos.where((m) => faltaMin <= m).toList();
+    if (toca.isEmpty) return;
+    final clave = '${ini.toIso8601String()}|${toca.reduce((a, b) => a < b ? a : b)}';
+    if (_avisados.contains(clave)) return;
+    _avisados.add(clave);
+    _avisar();
+  }
+
+  Future<void> _avisar() async {
+    try {
+      await windowManager.show();
+      await windowManager.focus();
+    } catch (_) {}
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => _DialogoMantenimiento(ini: _ini!),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ahora = DateTime.now();
+    final fase = _fase(ahora);
+    if (fase.isEmpty || (_cerrado && fase == 'anuncio')) {
+      return const SizedBox.shrink();
+    }
+    final ini = _ini!, fin = _fin!;
+    final color = fase == 'anuncio' ? _kAmbar : _kRojo;
+    final String titulo;
+    final String texto;
+    if (fase == 'activo') {
+      titulo = 'En mantenimiento hasta las ${_hora(fin)}';
+      texto = 'El servicio de soporte vuelve solo a esa hora.';
+    } else if (fase == 'pronto') {
+      titulo = 'Mantenimiento en ${_resta(ini.difference(ahora))}';
+      texto = _kTecnicos
+          ? 'A las ${_hora(ini)} se apaga el servidor y las sesiones se cortarán. '
+              'No empieces una nueva y avísale al cliente.'
+          : 'A las ${_hora(ini)} se apaga el servidor: si un técnico te está '
+              'atendiendo, la conexión se cortará a esa hora.';
+    } else {
+      titulo = 'Mantenimiento programado';
+      texto = _mensaje.isNotEmpty
+          ? _mensaje
+          : 'El servicio de soporte no estará disponible desde las ${_hora(ini)}.';
+    }
+    return Container(
+      margin: const EdgeInsets.only(top: 16, left: 12, right: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withOpacity(0.8)),
+        color: color.withOpacity(0.12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Text(titulo,
+                    style: const TextStyle(
+                        fontWeight: FontWeight.bold, fontSize: 13)),
+              ),
+              if (fase == 'anuncio')
+                InkWell(
+                  onTap: () => setState(() => _cerrado = true),
+                  child: const Icon(Icons.close, size: 16),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(texto, style: const TextStyle(fontSize: 12)),
+        ],
+      ),
+    );
+  }
+}
+
+class _DialogoMantenimiento extends StatefulWidget {
+  final DateTime ini;
+  const _DialogoMantenimiento({Key? key, required this.ini}) : super(key: key);
+
+  @override
+  State<_DialogoMantenimiento> createState() => _DialogoMantenimientoState();
+}
+
+class _DialogoMantenimientoState extends State<_DialogoMantenimiento> {
+  Timer? _reloj;
+
+  @override
+  void initState() {
+    super.initState();
+    _reloj = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      if (!DateTime.now().isBefore(widget.ini)) {
+        Navigator.of(context).maybePop();
+        return;
+      }
+      setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _reloj?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final falta = widget.ini.difference(DateTime.now());
+    return AlertDialog(
+      title: Text('Quedan ${_resta(falta)} para el mantenimiento'),
+      content: Text(_kTecnicos
+          ? 'A las ${_hora(widget.ini)} se apaga el servidor de JUSTECNO y las '
+              'sesiones de control remoto, terminal y archivos se cortarán. '
+              'Termina o guarda lo que estés haciendo y avísale al cliente.'
+          : 'A las ${_hora(widget.ini)} se apaga el servidor de JUSTECNO. Si un '
+              'técnico te está atendiendo, la conexión se cortará a esa hora. '
+              'Guarda lo que estés haciendo.'),
+      actions: [
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(
+              backgroundColor: _kBlue, foregroundColor: Colors.white),
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Entendido'),
+        ),
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Aviso de nueva versión
+// ---------------------------------------------------------------------------
+
+class _JustecnoActualizacion extends StatefulWidget {
+  const _JustecnoActualizacion({Key? key}) : super(key: key);
+
+  @override
+  State<_JustecnoActualizacion> createState() => _JustecnoActualizacionState();
+}
+
+class _JustecnoActualizacionState extends State<_JustecnoActualizacion> {
   static final _archivoOk = RegExp(r'^(windows|tecnicos)/[A-Za-z0-9._-]+\.exe$');
   static final _shaOk = RegExp(r'^[0-9a-f]{64}$');
 
