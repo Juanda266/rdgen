@@ -479,6 +479,15 @@ jobs:
           PY
           grep -n "justecno_cards\|JustecnoAliasCard\|JustecnoUpdateCard" flutter/lib/desktop/pages/desktop_home_page.dart
 
+      # Soporte JUSTECNO: menú "Calidad de transmisión" (tipo YouTube) en la barra de la sesión remota.
+      - name: justecno calidad
+        if: env.appname == env.JUSTECNO_APPNAME || env.appname == env.JUSTECNO_APPNAME_TECNICO
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 -c 1 2>/dev/null; then PY=python3; else PY=python; fi
+          "$PY" "$RUNNER_TEMP/justecno/justecno_calidad.py"
+
       - name: removeNewVersionNotif
         continue-on-error: true
         if: env.removeNewVersionNotif == 'true'
