@@ -11,16 +11,24 @@ pero en la versión gratuita nunca se activa. Aquí:
   2. si se cae el internet, ya no se rinde: reintenta cada segundo y el servidor completa lo que falte;
   3. sube en pedazos de 32 MB como mucho (Cloudflare no deja pasar más de 100 MB por petición);
   4. al terminar, cuando el servidor ya tiene todo, borra la grabación del equipo del cliente;
-  5. la ventana de conexión del cliente avisa "Esta sesión se graba por seguridad".
+  5. la ventana de conexión del cliente avisa "Esta sesión se graba por seguridad";
+  6. también sube lo que pasa por la terminal (lo que escribe el técnico y lo que responde el equipo) y una
+     copia de cada archivo que se transfiere (src/hbbs_http/justecno_registro.rs, que se baja del fork).
 
 Falla a propósito si una versión nueva de RustDesk cambia las líneas donde se engancha.
 """
+import os
 import sys
+import urllib.request
 
 SUBIDA = "src/hbbs_http/record_upload.rs"
 CM_PC = "flutter/lib/desktop/pages/server_page.dart"
 CM_MOVIL = "flutter/lib/mobile/pages/server_page.dart"
 URL = "https://justecno.com/jt-grabaciones"
+HBBS = "src/hbbs_http.rs"
+CONEXION = "src/server/connection.rs"
+TERMINAL = "src/server/terminal_service.rs"
+REGISTRO = "src/hbbs_http/justecno_registro.rs"
 AVISO = "Esta sesión se graba por seguridad"
 
 CAMBIOS = [
@@ -124,6 +132,35 @@ CAMBIOS = [
      "                            }\n"
      "                            std::thread::sleep(Duration::from_secs(3));\n"
      "                        }\n"),
+    # registro de terminal y archivos
+    (HBBS, "pub mod record_upload;\n", "pub mod record_upload;\npub mod justecno_registro; // Soporte JUSTECNO\n"),
+    (CONEXION,
+     "        if self.server_audit_file.is_empty() {\n",
+     "        // Soporte JUSTECNO: lista y copia de los archivos transferidos\n"
+     "        crate::hbbs_http::justecno_registro::archivos(\n"
+     "            matches!(r#type, FileAuditType::RemoteSend),\n"
+     "            path,\n"
+     "            &files,\n"
+     "        );\n"
+     "        if self.server_audit_file.is_empty() {\n"),
+    (TERMINAL,
+     "        data: &TerminalData,\n    ) -> Result<Option<TerminalResponse>> {\n",
+     "        data: &TerminalData,\n    ) -> Result<Option<TerminalResponse>> {\n"
+     "        // Soporte JUSTECNO: lo que escribe el técnico\n"
+     "        if data.compressed {\n"
+     "            crate::hbbs_http::justecno_registro::terminal(\n"
+     "                true,\n"
+     "                data.terminal_id,\n"
+     "                &hbb_common::compress::decompress(&data.data),\n"
+     "            );\n"
+     "        } else {\n"
+     "            crate::hbbs_http::justecno_registro::terminal(true, data.terminal_id, &data.data);\n"
+     "        }\n"),
+    (TERMINAL,
+     "    fn create_terminal_data_response(terminal_id: i32, data: Vec<u8>) -> TerminalResponse {\n",
+     "    fn create_terminal_data_response(terminal_id: i32, data: Vec<u8>) -> TerminalResponse {\n"
+     "        // Soporte JUSTECNO: lo que responde el equipo\n"
+     "        crate::hbbs_http::justecno_registro::terminal(false, terminal_id, &data);\n"),
     # aviso al cliente en la ventana de conexión (PC)
     (CM_PC,
      "                SizedBox(height: 10.0),\n                FittedBox(\n                    child: Row(\n",
@@ -158,8 +195,19 @@ def main():
         if t.count(viejo) != 1:
             sys.exit(f"justecno_grabacion: no encontré exactamente una vez {viejo[:70]!r} en {ruta}")
         textos[ruta] = t.replace(viejo, nuevo)
+    # el módulo nuevo: junto a este script (pruebas) o del mismo commit del fork (GitHub Actions)
+    local = os.path.join(os.path.dirname(os.path.abspath(__file__)), "justecno_registro.rs")
+    if os.path.exists(local):
+        rust = open(local, "rb").read()
+    else:
+        url = (f"https://raw.githubusercontent.com/{os.environ['GITHUB_REPOSITORY']}/{os.environ['GITHUB_SHA']}"
+               "/.github/patches/justecno/justecno_registro.rs")
+        rust = urllib.request.urlopen(url, timeout=60).read()
+    if b"pub fn terminal(" not in rust:
+        sys.exit("justecno_grabacion: justecno_registro.rs no es el esperado")
     for ruta, t in textos.items():
         open(ruta, "w", encoding="utf-8").write(t)
+    open(REGISTRO, "wb").write(rust)
     print("justecno_grabacion: grabación con subida en vivo y aviso al cliente agregados")
 
 
