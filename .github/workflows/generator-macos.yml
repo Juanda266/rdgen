@@ -567,6 +567,17 @@ jobs:
           if python3 -c 1 2>/dev/null; then PY=python3; else PY=python; fi
           "$PY" "$RUNNER_TEMP/justecno/justecno_calidad.py"
 
+      # Soporte JUSTECNO: grabación de las sesiones con subida en vivo al servidor (solo app de clientes).
+      - name: justecno grabacion
+        if: env.appname == 'JUSTECNO'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 -c 1 2>/dev/null; then PY=python3; else PY=python; fi
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/justecno_grabacion.py" \
+            "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/justecno/justecno_grabacion.py"
+          "$PY" "$RUNNER_TEMP/justecno_grabacion.py"
+
       - name: removeNewVersionNotif
         continue-on-error: true
         if: env.removeNewVersionNotif == 'true'
