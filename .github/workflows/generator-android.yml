@@ -257,6 +257,27 @@ jobs:
             "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/justecno/justecno_grabacion.py"
           "$PY" "$RUNNER_TEMP/justecno_grabacion.py"
 
+      # Soporte JUSTECNO: app de Android más fácil (abre en Compartir pantalla y asistente de permisos).
+      - name: justecno android
+        if: env.appname == 'JUSTECNO'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/justecno_android.py" \
+            "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/justecno/justecno_android.py"
+          python3 "$RUNNER_TEMP/justecno_android.py"
+
+      # Soporte JUSTECNO: a los clientes solo se conectan técnicos aprobados con JUSTECNO Técnico instalado.
+      - name: justecno tecnicos
+        if: env.appname == 'JUSTECNO' || env.appname == 'JUSTECNO-Tecnico'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 -c 1 2>/dev/null; then PY=python3; else PY=python; fi
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/justecno_tecnicos.py" \
+            "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/justecno/justecno_tecnicos.py"
+          "$PY" "$RUNNER_TEMP/justecno_tecnicos.py"
+
       - name: Install flutter
         uses: subosito/flutter-action@v2
         with:
