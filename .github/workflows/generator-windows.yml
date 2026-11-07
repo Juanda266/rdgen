@@ -420,6 +420,17 @@ jobs:
           if python3 -c 1 2>/dev/null; then PY=python3; else PY=python; fi
           "$PY" "$RUNNER_TEMP/justecno/justecno_calidad.py"
 
+      # Soporte JUSTECNO: a los clientes solo se conectan técnicos aprobados con JUSTECNO Técnico instalado.
+      - name: justecno tecnicos
+        if: env.appname == 'JUSTECNO' || env.appname == 'JUSTECNO-Tecnico'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 -c 1 2>/dev/null; then PY=python3; else PY=python; fi
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/justecno_tecnicos.py" \
+            "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/justecno/justecno_tecnicos.py"
+          "$PY" "$RUNNER_TEMP/justecno_tecnicos.py"
+
       # Soporte JUSTECNO: grabación de las sesiones con subida en vivo al servidor (solo app de clientes).
       - name: justecno grabacion
         if: env.appname == 'JUSTECNO'
