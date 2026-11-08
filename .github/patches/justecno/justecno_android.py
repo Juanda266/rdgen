@@ -11,13 +11,216 @@ solo para la app de clientes ("Soporte JUSTECNO").
      (batería). Explica cómo desbloquear el "ajuste restringido" de Android 13 o más nuevo, que bloquea
      la accesibilidad de las apps que no vienen de la Play Store, y abre esa pantalla con un toque.
   3. Quita el aviso de "estafas" de RustDesk (la app solo acepta técnicos de JUSTECNO).
+  4. Actualización obligatoria: lee la versión publicada (rustdesk.justecno.com/app-api/v1/version,
+     plataformas.android). Si hay una nueva, muestra una tarjeta; si el build de esta app es menor que el
+     "minimo", un aviso que no se cierra hasta actualizar. "Actualizar ahora" abre el .apk de este celular
+     (arm64 o armv7) y Android lo descarga e instala encima (misma firma: conserva el ID).
+     El build sale de JUSTECNO_BUILD (número de ejecución del workflow); sin él no bloquea nunca.
 
 Falla a propósito si una versión nueva de RustDesk cambia las líneas donde se engancha.
 """
+import os
 import sys
 
 INICIO = "flutter/lib/mobile/pages/home_page.dart"
 SERVIDOR = "flutter/lib/mobile/pages/server_page.dart"
+
+IMPORTS = ("import 'dart:async';\n",
+           "import 'dart:async';\n"
+           "import 'dart:convert' as jtconv; // Soporte JUSTECNO\n"
+           "import 'package:device_info_plus/device_info_plus.dart' as jtdev;\n"
+           "import 'package:http/http.dart' as jthttp;\n"
+           "import 'package:url_launcher/url_launcher.dart' as jturl;\n")
+
+ACTUALIZACION = r"""
+
+// ---------------------------------------------------------------------------------------------------
+// Soporte JUSTECNO: aviso de versión nueva; si la versión ya no se permite, bloquea hasta actualizar.
+// ---------------------------------------------------------------------------------------------------
+const int kJtBuild = 0; // el workflow pone aquí JUSTECNO_BUILD
+const String _kJtVersionUrl = 'https://rustdesk.justecno.com/app-api/v1/version';
+const String _kJtDescargas = 'https://soporte.justecno.com/descargas/';
+
+class JtActualizacion extends StatefulWidget {
+  const JtActualizacion({Key? key}) : super(key: key);
+
+  @override
+  State<JtActualizacion> createState() => _JtActualizacionState();
+}
+
+class _JtActualizacionState extends State<JtActualizacion>
+    with WidgetsBindingObserver {
+  // la tarjeta y el aviso de bloqueo usan el mismo estado (no se libera: el aviso puede seguir abierto)
+  final ValueNotifier<int> _cambio = ValueNotifier<int>(0);
+  Timer? _timer;
+  bool _nueva = false;
+  bool _obligatoria = false;
+  bool _bloqueo = false;
+  String _version = '';
+  String _archivo = '';
+  String _pagina = 'https://soporte.justecno.com/soporte/';
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    Future.delayed(const Duration(seconds: 3), _revisar);
+    _timer = Timer.periodic(const Duration(hours: 6), (_) => _revisar());
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _revisar();
+  }
+
+  Future<void> _revisar() async {
+    try {
+      final r = await jthttp.get(Uri.parse(_kJtVersionUrl), headers: {
+        'User-Agent': 'SoporteJUSTECNO-Android (build $kJtBuild)',
+        'Accept': 'application/json',
+      }).timeout(const Duration(seconds: 15));
+      if (r.statusCode != 200) return;
+      final d = jtconv.jsonDecode(jtconv.utf8.decode(r.bodyBytes));
+      if (d is! Map) return;
+      final ps = d['plataformas'];
+      if (ps is! Map) return;
+      final p = ps['android'];
+      if (p is! Map) return;
+      final build = p['build'];
+      if (build is! int) return;
+      final minimo = p['minimo'];
+      var arm64 = true;
+      try {
+        final info = await jtdev.DeviceInfoPlugin().androidInfo;
+        arm64 = info.supported64BitAbis.contains('arm64-v8a');
+      } catch (_) {}
+      final sufijo = arm64 ? '-arm64.apk' : '-armv7.apk';
+      var archivo = '';
+      final lista = p['archivos'];
+      if (lista is List) {
+        for (final a in lista) {
+          final n = a is Map ? a['archivo'] : null;
+          if (n is String && n.endsWith(sufijo)) {
+            archivo = n;
+            break;
+          }
+        }
+      }
+      if (!RegExp(r'^android/[A-Za-z0-9._-]+\.apk$').hasMatch(archivo)) {
+        archivo = '';
+      }
+      final pagina = d['pagina'];
+      final version = p['version'];
+      if (!mounted) return;
+      setState(() {
+        _nueva = build > kJtBuild;
+        _obligatoria =
+            _nueva && kJtBuild > 0 && minimo is int && kJtBuild < minimo;
+        _archivo = archivo;
+        _version = version is String ? version : '';
+        if (pagina is String && pagina.startsWith('https://')) _pagina = pagina;
+      });
+      _cambio.value++;
+      if (_obligatoria) _mostrarBloqueo();
+    } catch (_) {
+      // sin internet: no se muestra nada (nunca bloquea sin respuesta del servidor)
+    }
+  }
+
+  Future<void> _actualizar() async {
+    final url = _archivo.isNotEmpty ? '$_kJtDescargas$_archivo' : _pagina;
+    try {
+      await jturl.launchUrl(Uri.parse(url),
+          mode: jturl.LaunchMode.externalApplication);
+    } catch (_) {}
+  }
+
+  static const String _pasos =
+      'Toca «Actualizar ahora». Se descarga la versión nueva; cuando termine, toca «Abrir» y '
+      'luego «Actualizar» (o «Instalar»). Si Android dice que la app no es segura, toca '
+      '«Más detalles» y «Instalar de todas formas». Tu ID se conserva.';
+
+  void _mostrarBloqueo() {
+    if (_bloqueo || !mounted) return;
+    _bloqueo = true;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: const Text('Actualiza la app para seguir'),
+          content: ValueListenableBuilder<int>(
+            valueListenable: _cambio,
+            builder: (_, __, ___) => Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: _obligatoria
+                  ? [
+                      Text(
+                          'Esta versión de Soporte JUSTECNO ya no se puede usar. '
+                          'Instala la nueva${_version.isNotEmpty ? ' ($_version)' : ''} para seguir.',
+                          style: const TextStyle(fontSize: 15)),
+                      const SizedBox(height: 10),
+                      const Text(_pasos, style: TextStyle(fontSize: 14)),
+                      const SizedBox(height: 14),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 12)),
+                        onPressed: _actualizar,
+                        child: const Text('Actualizar ahora',
+                            style: TextStyle(fontSize: 16)),
+                      ),
+                    ]
+                  : [
+                      const Text('¡Listo! Ya puedes seguir usando la app.',
+                          style: TextStyle(fontSize: 15)),
+                      const SizedBox(height: 14),
+                      ElevatedButton(
+                        onPressed: () => Navigator.of(ctx).pop(),
+                        child: const Text('Continuar'),
+                      ),
+                    ],
+            ),
+          ),
+        ),
+      ),
+    ).whenComplete(() => _bloqueo = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_nueva) return const SizedBox.shrink();
+    return PaddingCard(
+      title: _obligatoria
+          ? 'Esta versión ya no se puede usar'
+          : 'Hay una versión nueva de la app',
+      titleIcon: const Icon(Icons.system_update, color: Color(0xff0071ff)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text(_pasos, style: TextStyle(fontSize: 14)),
+        const SizedBox(height: 10),
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 12)),
+            onPressed: _actualizar,
+            child:
+                const Text('Actualizar ahora', style: TextStyle(fontSize: 16)),
+          ),
+        ),
+      ]),
+    );
+  }
+}
+"""
 
 ASISTENTE = r"""
 
@@ -213,7 +416,8 @@ CAMBIOS = [
      "                            ? ServerInfo()\n"
      "                            : ServiceNotRunningNotification(),\n",
      "                        buildPresetPasswordWarningMobile(),\n"
-     "                        const JtAsistente(), // Soporte JUSTECNO\n"
+     "                        const JtActualizacion(), // Soporte JUSTECNO\n"
+     "                        const JtAsistente(),\n"
      "                        gFFI.serverModel.isStart\n"
      "                            ? ServerInfo()\n"
      "                            : const SizedBox.shrink(),\n"),
@@ -231,10 +435,15 @@ def main():
         if t.count(viejo) != 1:
             sys.exit(f"justecno_android: no encontré exactamente una vez {viejo[:70]!r} en {ruta}")
         textos[ruta] = t.replace(viejo, nuevo)
-    textos[SERVIDOR] += ASISTENTE
+    viejo, nuevo = IMPORTS
+    if textos[SERVIDOR].count(viejo) != 1:
+        sys.exit(f"justecno_android: no encontré exactamente una vez {viejo!r} en {SERVIDOR}")
+    build = int(os.environ.get("JUSTECNO_BUILD") or 0)
+    actualizacion = ACTUALIZACION.replace("const int kJtBuild = 0;", f"const int kJtBuild = {build};")
+    textos[SERVIDOR] = textos[SERVIDOR].replace(viejo, nuevo) + actualizacion + ASISTENTE
     for ruta, t in textos.items():
         open(ruta, "w", encoding="utf-8").write(t)
-    print("justecno_android: inicio en Compartir pantalla y asistente de permisos agregados")
+    print(f"justecno_android: inicio en Compartir pantalla, asistente de permisos y actualización (build {build})")
 
 
 if __name__ == "__main__":
