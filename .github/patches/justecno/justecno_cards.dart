@@ -4,12 +4,13 @@
 // La app de técnicos ("JUSTECNO-Tecnico", solo controla) usa únicamente JustecnoUpdateCard y
 // lee su propia versión en soporte.justecno.com/descargas/tecnicos/version.json.
 //
-// - JustecnoUpdateCard: consulta app-api/v1/version al iniciar y cada 24 h; si hay un
-//   "build" mayor que el propio, muestra un aviso. En Windows, con la app instalada,
-//   el botón "Instalar" descarga el .exe de soporte.justecno.com/descargas/, comprueba
-//   su SHA-256 con el de version.json y lo ejecuta con "--update" pidiendo permiso a
-//   Windows (UAC): es el mismo instalador interno de RustDesk, que conserva ID y ajustes.
-//   Si algo falla, queda el botón para abrir la página de descarga.
+// - JustecnoUpdateCard: consulta app-api/v1/version al iniciar y cada 6 h; si hay un
+//   "build" mayor que el propio, muestra un aviso. Si el build propio es menor que el
+//   "minimo" de version.json, la app queda bloqueada con un aviso que no se cierra hasta
+//   actualizar. "Actualizar ahora" descarga de soporte.justecno.com/descargas/ el archivo de
+//   este equipo, comprueba su SHA-256 con el de version.json y lo instala encima (conserva
+//   ID y ajustes): Windows .exe "--update" (UAC), Mac .dmg "--update" (clave del Mac),
+//   Linux .deb/.rpm/.pkg.tar.zst con pkexec. Si algo falla, queda el botón de la página.
 // - JustecnoAliasCard: el cliente escribe su nombre completo y un usuario único; se guardan
 //   en la libreta compartida del servidor (rustdesk.justecno.com/app-api/v1/alias) como
 //   "Nombre completo (usuario)". Si otro equipo ya tiene ese usuario: "Nombre de usuario ocupado".
@@ -17,7 +18,7 @@
 //   mantenimiento programado en soporte.justecno.com/wp-json/justecno/v1/mantenimiento. Desde 2 días
 //   antes muestra el aviso; en los últimos 30 minutos, la cuenta regresiva. A los 30, 10, 5 y 1 minuto
 //   trae la ventana al frente con un aviso, para que quien está en sesión sepa cuándo se corta.
-// Todas fallan en silencio sin red: nunca bloquean la app.
+// Todas fallan en silencio sin red: sin respuesta del servidor nunca bloquean la app.
 
 import 'dart:async';
 import 'dart:convert';
@@ -356,18 +357,31 @@ class _JustecnoActualizacion extends StatefulWidget {
   State<_JustecnoActualizacion> createState() => _JustecnoActualizacionState();
 }
 
+// Si en version.json el "minimo" de este sistema es mayor que el build propio, la versión ya no se
+// puede usar: sale un aviso que no se cierra hasta actualizar (las conexiones entrantes siguen
+// funcionando, así un técnico puede entrar y actualizarla). Se instala desde la misma app:
+//   Windows: el .exe con "--update" (Windows pide permiso).
+//   Mac: el .dmg con "--update" (RustDesk lo instala en Aplicaciones y pide la clave del Mac).
+//   Linux: el paquete con pkexec (apt-get, dnf, zypper, rpm o pacman; pide la clave del equipo).
 class _JustecnoActualizacionState extends State<_JustecnoActualizacion> {
-  static final _archivoOk = RegExp(r'^(windows|tecnicos)/[A-Za-z0-9._-]+\.exe$');
+  static final _archivoOk = RegExp(
+      r'^(windows|macos|linux|tecnicos(/(macos|linux))?)/[A-Za-z0-9._-]+\.(exe|dmg|deb|rpm|zst)$');
   static final _shaOk = RegExp(r'^[0-9a-f]{64}$');
 
+  // La tarjeta y el aviso de bloqueo se dibujan con el mismo estado. No se libera en dispose():
+  // el aviso puede seguir abierto un instante después.
+  final ValueNotifier<int> _cambio = ValueNotifier<int>(0);
   Timer? _first;
-  Timer? _daily;
+  Timer? _periodic;
   String _version = '';
   String _page = _kDefaultPage;
   String _archivo = '';
   String _sha = '';
   int _size = 0;
   bool _available = false;
+  bool _obligatoria = false;
+  bool _puedeInstalar = false;
+  bool _bloqueoAbierto = false;
   bool _closed = false;
   bool _installing = false;
   double? _progress;
@@ -378,14 +392,68 @@ class _JustecnoActualizacionState extends State<_JustecnoActualizacion> {
   void initState() {
     super.initState();
     _first = Timer(const Duration(seconds: 5), _check);
-    _daily = Timer.periodic(const Duration(hours: 24), (_) => _check());
+    _periodic = Timer.periodic(const Duration(hours: 6), (_) => _check());
   }
 
   @override
   void dispose() {
     _first?.cancel();
-    _daily?.cancel();
+    _periodic?.cancel();
     super.dispose();
+  }
+
+  void _set(VoidCallback fn) {
+    if (!mounted) return;
+    setState(fn);
+    _cambio.value++;
+  }
+
+  bool _existe(String ruta) {
+    try {
+      return File(ruta).existsSync();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<String> _salida(String cmd, List<String> args) async {
+    try {
+      final r = await Process.run(cmd, args);
+      if (r.exitCode == 0) return r.stdout.toString().trim();
+    } catch (_) {}
+    return '';
+  }
+
+  // Final del nombre del archivo que le sirve a este equipo (ver PLATAFORMAS en
+  // justecno-actualizador). null: el archivo principal (Windows). '': no hay para este equipo.
+  Future<String?> _sufijo() async {
+    if (Platform.isWindows) return null;
+    final arm =
+        RegExp(r'arm64|aarch64').hasMatch(await _salida('uname', ['-m']));
+    if (Platform.isMacOS) return arm ? '-apple.dmg' : '-intel.dmg';
+    if (_existe('/usr/bin/dpkg')) return arm ? '-arm64.deb' : '-amd64.deb';
+    if (_existe('/usr/bin/pacman')) return arm ? '' : '-arch.pkg.tar.zst';
+    if (_existe('/usr/bin/rpm')) {
+      var suse = false;
+      try {
+        suse = File('/etc/os-release')
+            .readAsStringSync()
+            .toLowerCase()
+            .contains('suse');
+      } catch (_) {}
+      if (suse) return arm ? '' : '-suse-x86_64.rpm';
+      return arm ? '-aarch64.rpm' : '-x86_64.rpm';
+    }
+    return '';
+  }
+
+  bool get _instalada {
+    if (Platform.isLinux) return _existe('/usr/bin/pkexec');
+    try {
+      return bind.mainIsInstalled();
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> _check() async {
@@ -403,41 +471,69 @@ class _JustecnoActualizacionState extends State<_JustecnoActualizacion> {
       if (plat is! Map) return;
       final build = plat['build'];
       if (build is! int) return;
+      final minimo = plat['minimo'];
       final page = data['pagina'];
       final version = plat['version'];
-      final archivo = plat['archivo'];
-      final sha = plat['sha256'];
-      final size = plat['tamano'];
-      if (!mounted) return;
-      setState(() {
+      dynamic archivo = plat['archivo'];
+      dynamic sha = plat['sha256'];
+      dynamic size = plat['tamano'];
+      final suf = await _sufijo();
+      if (suf != null) {
+        archivo = null;
+        sha = null;
+        size = null;
+        final lista = plat['archivos'];
+        if (suf.isNotEmpty && lista is List) {
+          for (final a in lista) {
+            if (a is! Map) continue;
+            final n = a['archivo'];
+            if (n is String &&
+                n.endsWith(suf) &&
+                (suf.contains('suse') || !n.contains('-suse-'))) {
+              archivo = n;
+              sha = a['sha256'];
+              size = a['tamano'];
+              break;
+            }
+          }
+        }
+      }
+      final instalada = _instalada;
+      _set(() {
         _available = build > kJustecnoBuild;
+        _obligatoria = _available &&
+            kJustecnoBuild > 0 &&
+            minimo is int &&
+            kJustecnoBuild < minimo;
         _version = version is String ? version : '';
         if (page is String && page.startsWith('https://')) _page = page;
         _archivo = archivo is String ? archivo : '';
         _sha = sha is String ? sha.toLowerCase() : '';
         _size = size is int ? size : 0;
+        _puedeInstalar = instalada &&
+            _archivoOk.hasMatch(_archivo) &&
+            _shaOk.hasMatch(_sha);
       });
+      if (_obligatoria) _mostrarBloqueo();
     } catch (_) {
       // Sin red o JSON inválido: no se muestra nada.
     }
   }
 
-  bool get _canInstall {
-    if (!Platform.isWindows) return false;
-    if (!_archivoOk.hasMatch(_archivo) || !_shaOk.hasMatch(_sha)) return false;
-    try {
-      return bind.mainIsInstalled();
-    } catch (_) {
-      return false;
-    }
-  }
-
   void _setStatus(String status, {bool error = false, double? progress}) {
-    if (!mounted) return;
-    setState(() {
+    _set(() {
       _status = status;
       _statusIsError = error;
       _progress = progress;
+    });
+  }
+
+  void _fallo(String status) {
+    _set(() {
+      _installing = false;
+      _status = status;
+      _statusIsError = true;
+      _progress = null;
     });
   }
 
@@ -446,8 +542,8 @@ class _JustecnoActualizacionState extends State<_JustecnoActualizacion> {
         '${Directory.systemTemp.path}${Platform.pathSeparator}SoporteJUSTECNO-actualizacion');
     if (await dir.exists()) await dir.delete(recursive: true);
     await dir.create(recursive: true);
-    final file =
-        File('${dir.path}${Platform.pathSeparator}Soporte-JUSTECNO.exe');
+    final nombre = Platform.isWindows ? 'Soporte-JUSTECNO.exe' : _archivo.split('/').last;
+    final file = File('${dir.path}${Platform.pathSeparator}$nombre');
     final headers = await _headers();
     headers['Accept'] = '*/*';
     final client = http.Client();
@@ -487,26 +583,66 @@ class _JustecnoActualizacionState extends State<_JustecnoActualizacion> {
     }
   }
 
-  // SHA-256 con certutil (viene en Windows); los argumentos van sin shell.
+  // SHA-256 con lo que trae cada sistema (certutil, shasum, sha256sum); los argumentos van sin shell.
   Future<String> _sha256(File file) async {
-    final r = await Process.run('certutil', ['-hashfile', file.path, 'SHA256']);
-    if (r.exitCode != 0) return '';
-    for (final line in r.stdout.toString().split(RegExp(r'\r?\n'))) {
-      final hex = line.replaceAll(' ', '').trim().toLowerCase();
-      if (_shaOk.hasMatch(hex)) return hex;
-    }
+    try {
+      final ProcessResult r;
+      if (Platform.isWindows) {
+        r = await Process.run('certutil', ['-hashfile', file.path, 'SHA256']);
+      } else if (Platform.isMacOS) {
+        r = await Process.run('shasum', ['-a', '256', file.path]);
+      } else {
+        r = await Process.run('sha256sum', [file.path]);
+      }
+      if (r.exitCode != 0) return '';
+      final out = r.stdout.toString();
+      if (!Platform.isWindows) {
+        final hex = out.trim().split(RegExp(r'\s+')).first.toLowerCase();
+        return _shaOk.hasMatch(hex) ? hex : '';
+      }
+      for (final line in out.split(RegExp(r'\r?\n'))) {
+        final hex = line.replaceAll(' ', '').trim().toLowerCase();
+        if (_shaOk.hasMatch(hex)) return hex;
+      }
+    } catch (_) {}
     return '';
   }
 
+  List<String>? _comandoLinux(String ruta) {
+    if (ruta.endsWith('.deb')) {
+      return _existe('/usr/bin/apt-get')
+          ? ['apt-get', 'install', '-y', ruta]
+          : ['dpkg', '-i', ruta];
+    }
+    if (ruta.endsWith('.pkg.tar.zst')) {
+      return ['pacman', '-U', '--noconfirm', ruta];
+    }
+    if (ruta.endsWith('.rpm')) {
+      if (_existe('/usr/bin/dnf')) return ['dnf', 'install', '-y', ruta];
+      if (_existe('/usr/bin/zypper')) {
+        return [
+          'zypper',
+          '--non-interactive',
+          'install',
+          '--allow-unsigned-rpm',
+          ruta
+        ];
+      }
+      return ['rpm', '-U', '--replacepkgs', ruta];
+    }
+    return null;
+  }
+
   Future<void> _install() async {
-    setState(() {
+    _set(() {
       _installing = true;
       _status = 'Descargando…';
       _statusIsError = false;
       _progress = null;
     });
+    late final File file;
     try {
-      final file = await _download();
+      file = await _download();
       _setStatus('Comprobando el archivo…');
       if (await _sha256(file) != _sha) {
         try {
@@ -514,38 +650,61 @@ class _JustecnoActualizacionState extends State<_JustecnoActualizacion> {
         } catch (_) {}
         throw Exception('el archivo no coincide');
       }
-      _setStatus('Windows te pedirá permiso: pulsa "Sí" para instalar.');
-      final ruta = file.path.replaceAll("'", "''");
-      final r = await Process.run('powershell', [
-        '-NoProfile',
-        '-NonInteractive',
-        '-WindowStyle',
-        'Hidden',
-        '-Command',
-        "Start-Process -FilePath '$ruta' -ArgumentList '--update' -Verb RunAs"
-      ]);
-      if (r.exitCode != 0) {
-        if (!mounted) return;
-        setState(() {
-          _installing = false;
-          _status = 'No se instaló: Windows no dio el permiso. '
-              'Puedes intentarlo de nuevo cuando quieras.';
-          _statusIsError = true;
-          _progress = null;
-        });
-        return;
-      }
-      _setStatus('Instalando… la app se cerrará y se abrirá sola en unos '
-          'segundos con la versión nueva.');
     } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _installing = false;
-        _status = 'No se pudo descargar la actualización. Revisa tu conexión '
-            'o descárgala desde la página.';
-        _statusIsError = true;
-        _progress = null;
-      });
+      _fallo('No se pudo descargar la actualización. Revisa tu conexión '
+          'o descárgala desde la página.');
+      return;
+    }
+    try {
+      if (Platform.isWindows) {
+        _setStatus('Windows te pedirá permiso: pulsa "Sí" para instalar.');
+        final ruta = file.path.replaceAll("'", "''");
+        final r = await Process.run('powershell', [
+          '-NoProfile',
+          '-NonInteractive',
+          '-WindowStyle',
+          'Hidden',
+          '-Command',
+          "Start-Process -FilePath '$ruta' -ArgumentList '--update' -Verb RunAs"
+        ]);
+        if (r.exitCode != 0) {
+          _fallo('No se instaló: Windows no dio el permiso. '
+              'Puedes intentarlo de nuevo cuando quieras.');
+          return;
+        }
+        _setStatus('Instalando… la app se cerrará y se abrirá sola en unos '
+            'segundos con la versión nueva.');
+      } else if (Platform.isMacOS) {
+        await Process.start(
+            Platform.resolvedExecutable, ['--update', file.path],
+            mode: ProcessStartMode.detached);
+        _setStatus('Tu Mac te pedirá la contraseña para instalar. Después la '
+            'app se cerrará y se abrirá sola con la versión nueva.');
+      } else {
+        final cmd = _comandoLinux(file.path);
+        if (cmd == null) throw Exception('paquete desconocido');
+        _setStatus('El equipo te pedirá tu contraseña para instalar.');
+        final r = await Process.run('pkexec', cmd);
+        if (r.exitCode != 0) {
+          _fallo(r.exitCode == 126 || r.exitCode == 127
+              ? 'No se instaló: no se dio el permiso. Puedes intentarlo de '
+                  'nuevo cuando quieras.'
+              : 'No se pudo instalar la actualización. Descárgala desde la '
+                  'página.');
+          return;
+        }
+        _setStatus('¡Listo! Abriendo la versión nueva…');
+        try {
+          await file.delete();
+        } catch (_) {}
+        await Process.start(Platform.resolvedExecutable, [],
+            mode: ProcessStartMode.detached);
+        await Future.delayed(const Duration(seconds: 1));
+        exit(0);
+      }
+    } catch (_) {
+      _fallo('No se pudo instalar la actualización. Descárgala desde la '
+          'página.');
     }
   }
 
@@ -555,15 +714,66 @@ class _JustecnoActualizacionState extends State<_JustecnoActualizacion> {
     } catch (_) {}
   }
 
-  @override
-  Widget build(BuildContext context) {
-    if (!_available || _closed) return const SizedBox.shrink();
-    final title = _version.isNotEmpty
-        ? 'Nueva versión de $_kNombreApp disponible (versión $_version)'
-        : 'Nueva versión de $_kNombreApp disponible';
-    final canInstall = _canInstall;
-    final children = <Widget>[
-      Row(
+  // Aviso que no se puede cerrar mientras la versión sea obligatoria.
+  void _mostrarBloqueo() {
+    if (_bloqueoAbierto || !mounted) return;
+    _bloqueoAbierto = true;
+    () async {
+      try {
+        await windowManager.show();
+        await windowManager.focus();
+      } catch (_) {}
+      if (!mounted) {
+        _bloqueoAbierto = false;
+        return;
+      }
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => PopScope(
+          canPop: false,
+          child: AlertDialog(
+            title: Text('Actualiza $_kNombreApp para seguir'),
+            content: SizedBox(
+              width: 440,
+              child: ValueListenableBuilder<int>(
+                valueListenable: _cambio,
+                builder: (_, __, ___) => Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: _contenido(
+                      enDialogo: true, cerrar: () => Navigator.of(ctx).pop()),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      _bloqueoAbierto = false;
+    }();
+  }
+
+  String get _permiso {
+    if (Platform.isWindows) return 'Windows te pedirá permiso: pulsa «Sí».';
+    if (Platform.isMacOS) return 'Tu Mac te pedirá la contraseña del equipo.';
+    return 'El equipo te pedirá tu contraseña.';
+  }
+
+  List<Widget> _contenido({required bool enDialogo, VoidCallback? cerrar}) {
+    final children = <Widget>[];
+    final conVersion = _version.isNotEmpty ? ' (versión $_version)' : '';
+    if (enDialogo) {
+      children.add(Text(
+          _obligatoria
+              ? 'Esta versión de $_kNombreApp ya no se puede usar. Instala la '
+                  'versión nueva$conVersion para seguir usándola.'
+              : '¡Listo! Ya puedes seguir usando la app.',
+          style: const TextStyle(fontSize: 14)));
+    } else {
+      final title = _obligatoria
+          ? 'Esta versión de $_kNombreApp ya no se puede usar: actualízala$conVersion'
+          : 'Nueva versión de $_kNombreApp disponible$conVersion';
+      children.add(Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Expanded(
@@ -571,21 +781,21 @@ class _JustecnoActualizacionState extends State<_JustecnoActualizacion> {
                 style:
                     const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
           ),
-          if (!_installing)
+          if (!_installing && !_obligatoria)
             InkWell(
-              onTap: () => setState(() => _closed = true),
+              onTap: () => _set(() => _closed = true),
               child: const Icon(Icons.close, size: 16),
             ),
         ],
-      ),
-    ];
-    if (canInstall && !_installing && _status.isEmpty) {
+      ));
+    }
+    if (_puedeInstalar && !_installing && _status.isEmpty) {
       children.addAll([
         const SizedBox(height: 6),
-        const Text(
-            'Se instala sobre la actual y conservas tu ID y tus ajustes. '
+        Text(
+            'Se instala sobre la actual y conservas tu ID y tus ajustes. $_permiso '
             'Si un técnico está conectado, la conexión se cortará unos segundos.',
-            style: TextStyle(fontSize: 12)),
+            style: const TextStyle(fontSize: 12)),
       ]);
     }
     if (_status.isNotEmpty) {
@@ -593,8 +803,7 @@ class _JustecnoActualizacionState extends State<_JustecnoActualizacion> {
         const SizedBox(height: 8),
         Text(_status,
             style: TextStyle(
-                fontSize: 12,
-                color: _statusIsError ? Colors.red : null)),
+                fontSize: 12, color: _statusIsError ? Colors.red : null)),
       ]);
     }
     if (_installing) {
@@ -602,17 +811,28 @@ class _JustecnoActualizacionState extends State<_JustecnoActualizacion> {
         const SizedBox(height: 8),
         LinearProgressIndicator(value: _progress),
       ]);
+    } else if (enDialogo && !_obligatoria) {
+      children.addAll([
+        const SizedBox(height: 10),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(
+              backgroundColor: _kBlue, foregroundColor: Colors.white),
+          onPressed: cerrar,
+          child: const Text('Continuar'),
+        ),
+      ]);
     } else {
       children.addAll([
         const SizedBox(height: 10),
         ElevatedButton(
           style: ElevatedButton.styleFrom(
               backgroundColor: _kBlue, foregroundColor: Colors.white),
-          onPressed: canInstall ? _install : _openPage,
-          child: Text(canInstall ? 'Instalar' : 'Ir a la página de descarga'),
+          onPressed: _puedeInstalar ? _install : _openPage,
+          child: Text(
+              _puedeInstalar ? 'Actualizar ahora' : 'Ir a la página de descarga'),
         ),
       ]);
-      if (canInstall) {
+      if (_puedeInstalar) {
         children.add(Align(
           alignment: Alignment.centerRight,
           child: TextButton(
@@ -622,7 +842,13 @@ class _JustecnoActualizacionState extends State<_JustecnoActualizacion> {
         ));
       }
     }
-    return _card(context, children);
+    return children;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_available || (_closed && !_obligatoria)) return const SizedBox.shrink();
+    return _card(context, _contenido(enDialogo: false));
   }
 }
 
