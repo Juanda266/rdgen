@@ -261,6 +261,8 @@ jobs:
       - name: justecno android
         if: env.appname == 'JUSTECNO'
         shell: bash
+        env:
+          JUSTECNO_BUILD: "${{ github.run_number }}"
         run: |
           set -euo pipefail
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/justecno_android.py" \
