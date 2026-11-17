@@ -1,4 +1,5 @@
 import io
+import logging
 from pathlib import Path
 from django.http import HttpResponse, JsonResponse, HttpResponseForbidden
 from django.shortcuts import render, get_object_or_404
@@ -13,10 +14,12 @@ import uuid
 import pyzipper
 from django.conf import settings as _settings
 from django.db.models import Q
-from .forms import GenerateForm
+from .forms import GenerateForm, HEX_COLOR_RE
 from .models import GithubRun
 from PIL import Image
 from urllib.parse import quote
+
+logger = logging.getLogger(__name__)
 
 # get_png, download and save_custom_client build file paths from request values;
 # only accept a UUID and a plain file name so "../" or absolute paths cannot escape png/ and exe/.
@@ -29,6 +32,30 @@ def _safe_parts(uuid_val, filename):
     if filename is not None and (not _NAME_RE.match(filename) or filename.startswith('.')):
         return False
     return True
+
+
+def _norm_hex_color(value):
+    """Return canonical #RRGGBB, or '' for blank/invalid (stock color).
+
+    The workflows receive this as a step env var and interpolate it into Dart
+    0xAARRGGBB literals, so nothing but validated hex may reach them.
+    """
+    value = value if isinstance(value, str) else ''
+    value = value.strip()
+    if not value or not HEX_COLOR_RE.match(value):
+        return ''
+    return '#' + value.lstrip('#').upper()
+
+
+def get_full_url(request):
+    """URL the GitHub workflow uses to reach this server. GENURL wins over the
+    request host, which can be an internal address behind a reverse proxy."""
+    if _settings.GENURL:
+        genurl = _settings.GENURL.rstrip('/')
+        if '://' in genurl:
+            return genurl
+        return f"{_settings.PROTOCOL}://{genurl}"
+    return f"{_settings.PROTOCOL}://{request.get_host()}"
 
 
 def generate_custom_client(params, full_url):
@@ -46,7 +73,7 @@ def generate_custom_client(params, full_url):
     user_secret = params.get('sh_secret_field', '')
     selfhosted = (_settings.SH_SECRET == user_secret)
     platform = params.get('platform', 'windows')
-    version = params.get('version', '1.5.1')
+    version = params.get('version', '1.5.3')
     app_version = params.get('app_version', '')
     # app_version overrides the version string embedded in the built client
     # without changing the git tag that version selects. If left empty, the
@@ -97,11 +124,15 @@ def generate_custom_client(params, full_url):
     permPass = params.get('permanentPassword', '')
     theme = params.get('theme', 'system')
     themeDorO = params.get('themeDorO', 'default')
+    # Optional Flutter theme colours; blank means "leave the stock colour".
+    themeColor = _norm_hex_color(params.get('themeColor', ''))
+    themeSurfaceLight = _norm_hex_color(params.get('themeSurfaceLight', ''))
+    themeSurfaceDark = _norm_hex_color(params.get('themeSurfaceDark', ''))
+    themeMeColor = _norm_hex_color(params.get('themeMeColor', ''))
     passApproveMode = params.get('passApproveMode', 'password-click')
     denyLan = params.get('denyLan', False)
     enableDirectIP = params.get('enableDirectIP', False)
     autoClose = params.get('autoClose', False)
-    permissionsDorO = params.get('permissionsDorO', 'default')
     permissionsType = params.get('permissionsType', 'custom')
     enableKeyboard = params.get('enableKeyboard', True)
     enableClipboard = params.get('enableClipboard', True)
@@ -126,6 +157,10 @@ def generate_custom_client(params, full_url):
         filename = "rustdesk"
     if not all(char.isascii() for char in appname):
         appname = "rustdesk"
+    # Treat "RustDesk" as the default name too, so the app-name key and the
+    # workflow's directory rename stay in sync.
+    if appname.lower() == "rustdesk":
+        appname = "rustdesk"
     myuuid = str(uuid.uuid4())
 
     try:
@@ -134,7 +169,7 @@ def generate_custom_client(params, full_url):
             iconfile = params.get('iconbase64')
         iconlink_url, iconlink_uuid, iconlink_file = save_png(iconfile,myuuid,full_url,"icon.png")
     except:
-        print("failed to get icon, using default")
+        logger.info("failed to get icon, using default")
         iconlink_url = "false"
         iconlink_uuid = "false"
         iconlink_file = "false"
@@ -144,7 +179,7 @@ def generate_custom_client(params, full_url):
             logofile = params.get('logobase64')
         logolink_url, logolink_uuid, logolink_file = save_png(logofile,myuuid,full_url,"logo.png")
     except:
-        print("failed to get logo")
+        logger.info("failed to get logo")
         logolink_url = "false"
         logolink_uuid = "false"
         logolink_file = "false"
@@ -154,25 +189,39 @@ def generate_custom_client(params, full_url):
             privacyfile = params.get('privacybase64')
         privacylink_url, privacylink_uuid, privacylink_file = save_png(privacyfile,myuuid,full_url,"privacy.png")
     except:
-        print("failed to get logo")
+        logger.info("failed to get privacy screen")
         privacylink_url = "false"
         privacylink_uuid = "false"
         privacylink_file = "false"
 
     ###create the custom.txt json here and send in as inputs below
     decodedCustom = {}
-    if direction != "Both":
+    if direction != "both":
         decodedCustom['conn-type'] = direction
     if installation == "installationN":
         decodedCustom['disable-installation'] = 'Y'
     if settings == "settingsN":
         decodedCustom['disable-settings'] = 'Y'
-    if appname.upper != "rustdesk".upper and appname != "":
+    if appname.lower() != "rustdesk":
         decodedCustom['app-name'] = appname_display
+
+    # Permissions and security settings are enforced (override) so they also
+    # apply on machines that already have a saved RustDesk configuration.
+    # Anything placed in default-settings loses to a value the user (or a
+    # previous installation) already stored.
     decodedCustom['override-settings'] = {}
     decodedCustom['default-settings'] = {}
+    override = decodedCustom['override-settings']
+
+    # Remove the "Powered by <app>" link entirely. RustDesk ships a built-in
+    # option for this that BOTH the Flutter UI (loadPowered) and the Sciter UI
+    # check; unlike rewriting the powered_by_me translation, it removes the
+    # element instead of leaving an empty (still clickable) label behind.
+    override['hide-powered-by-me'] = 'Y'
+
     if permPass != "":
         decodedCustom['password'] = permPass
+
     if theme != "system":
         if themeDorO == "default":
             if platform == "windows-x86":
@@ -184,65 +233,85 @@ def generate_custom_client(params, full_url):
                 decodedCustom['override-settings']['allow-darktheme'] = 'Y' if theme == "dark" else 'N'
             else:
                 decodedCustom['override-settings']['theme'] = theme
-    decodedCustom['enable-lan-discovery'] = 'N' if denyLan else 'Y'
-    #decodedCustom['direct-server'] = 'Y' if enableDirectIP else 'N'
-    decodedCustom['allow-auto-disconnect'] = 'Y' if autoClose else 'N'
 
-    if permissionsDorO == "default":
-        decodedCustom['default-settings']['access-mode'] = permissionsType
-        decodedCustom['default-settings']['enable-keyboard'] = 'Y' if enableKeyboard else 'N'
-        decodedCustom['default-settings']['enable-clipboard'] = 'Y' if enableClipboard else 'N'
-        decodedCustom['default-settings']['enable-file-transfer'] = 'Y' if enableFileTransfer else 'N'
-        decodedCustom['default-settings']['enable-audio'] = 'Y' if enableAudio else 'N'
-        decodedCustom['default-settings']['enable-tunnel'] = 'Y' if enableTCP else 'N'
-        decodedCustom['default-settings']['enable-remote-restart'] = 'Y' if enableRemoteRestart else 'N'
-        decodedCustom['default-settings']['enable-record-session'] = 'Y' if enableRecording else 'N'
-        decodedCustom['default-settings']['enable-block-input'] = 'Y' if enableBlockingInput else 'N'
-        decodedCustom['default-settings']['allow-remote-config-modification'] = 'Y' if enableRemoteModi else 'N'
-        decodedCustom['default-settings']['direct-server'] = 'Y' if enableDirectIP else 'N'
-        decodedCustom['default-settings']['verification-method'] = 'use-permanent-password' if hidecm else 'use-both-passwords'
-        decodedCustom['default-settings']['approve-mode'] = passApproveMode
-        decodedCustom['default-settings']['allow-hide-cm'] = 'Y' if hidecm else 'N'
-        decodedCustom['default-settings']['allow-remove-wallpaper'] = 'Y' if removeWallpaper else 'N'
-        decodedCustom['default-settings']['enable-remote-printer'] = 'Y' if enablePrinter else 'N'
-        decodedCustom['default-settings']['enable-camera'] = 'Y' if enableCamera else 'N'
-        decodedCustom['default-settings']['enable-terminal'] = 'Y' if enableTerminal else 'N'
-        
+    # enable-lan-discovery and allow-auto-disconnect are read through
+    # Config::get_option, so they must live in a settings map.  A top-level
+    # key would only land in HARD_SETTINGS and be ignored by get_option.
+    override['enable-lan-discovery'] = 'N' if denyLan else 'Y'
+    override['allow-auto-disconnect'] = 'Y' if autoClose else 'N'
 
-    else:
-        decodedCustom['override-settings']['access-mode'] = permissionsType
-        decodedCustom['override-settings']['enable-keyboard'] = 'Y' if enableKeyboard else 'N'
-        decodedCustom['override-settings']['enable-clipboard'] = 'Y' if enableClipboard else 'N'
-        decodedCustom['override-settings']['enable-file-transfer'] = 'Y' if enableFileTransfer else 'N'
-        decodedCustom['override-settings']['enable-audio'] = 'Y' if enableAudio else 'N'
-        decodedCustom['override-settings']['enable-tunnel'] = 'Y' if enableTCP else 'N'
-        decodedCustom['override-settings']['enable-remote-restart'] = 'Y' if enableRemoteRestart else 'N'
-        decodedCustom['override-settings']['enable-record-session'] = 'Y' if enableRecording else 'N'
-        decodedCustom['override-settings']['enable-block-input'] = 'Y' if enableBlockingInput else 'N'
-        decodedCustom['override-settings']['allow-remote-config-modification'] = 'Y' if enableRemoteModi else 'N'
-        decodedCustom['override-settings']['direct-server'] = 'Y' if enableDirectIP else 'N'
-        decodedCustom['override-settings']['verification-method'] = 'use-permanent-password' if hidecm else 'use-both-passwords'
-        decodedCustom['override-settings']['approve-mode'] = passApproveMode
-        decodedCustom['override-settings']['allow-hide-cm'] = 'Y' if hidecm else 'N'
-        decodedCustom['override-settings']['allow-remove-wallpaper'] = 'Y' if removeWallpaper else 'N'
-        decodedCustom['override-settings']['enable-remote-printer'] = 'Y' if enablePrinter else 'N'
-        decodedCustom['override-settings']['enable-camera'] = 'Y' if enableCamera else 'N'
-        decodedCustom['override-settings']['enable-terminal'] = 'Y' if enableTerminal else 'N'
-        if direction == 'incoming':
-            decodedCustom['override-settings']['custom-rendezvous-server'] = server
-            decodedCustom['override-settings']['api-server'] = apiServer
+    # The permission checkboxes are disabled by the form for "full" and
+    # "view", so disabled inputs are not submitted.  Derive those two modes
+    # explicitly instead of trusting the missing parameters.
+    if permissionsType == "full":
+        enableKeyboard = enableClipboard = enableFileTransfer = True
+        enableAudio = enableTCP = enableRemoteRestart = enableRecording = True
+        enableBlockingInput = enableRemoteModi = True
+        enablePrinter = enableCamera = enableTerminal = True
+    elif permissionsType == "view":
+        enableKeyboard = enableClipboard = enableFileTransfer = False
+        enableAudio = enableTCP = enableRemoteRestart = enableRecording = False
+        enableBlockingInput = enableRemoteModi = False
+        enablePrinter = enableCamera = enableTerminal = False
+
+    override['access-mode'] = permissionsType
+    override['enable-keyboard'] = 'Y' if enableKeyboard else 'N'
+    override['enable-clipboard'] = 'Y' if enableClipboard else 'N'
+    override['enable-file-transfer'] = 'Y' if enableFileTransfer else 'N'
+    override['enable-audio'] = 'Y' if enableAudio else 'N'
+    override['enable-tunnel'] = 'Y' if enableTCP else 'N'
+    override['enable-remote-restart'] = 'Y' if enableRemoteRestart else 'N'
+    override['enable-record-session'] = 'Y' if enableRecording else 'N'
+    override['enable-block-input'] = 'Y' if enableBlockingInput else 'N'
+    override['allow-remote-config-modification'] = 'Y' if enableRemoteModi else 'N'
+    override['direct-server'] = 'Y' if enableDirectIP else 'N'
+    # A baked permanent password is authoritative: make it the permanent
+    # password method instead of silently leaving "both passwords" enabled.
+    override['verification-method'] = 'use-permanent-password' if permPass else 'use-both-passwords'
+    # hide_cm() only returns true with approve-mode=password and a permanent
+    # password, so do not advertise the feature when it cannot work.
+    effective_hidecm = bool(hidecm and permPass)
+    override['approve-mode'] = 'password' if effective_hidecm else passApproveMode
+    override['allow-hide-cm'] = 'Y' if effective_hidecm else 'N'
+    override['allow-remove-wallpaper'] = 'Y' if removeWallpaper else 'N'
+    override['enable-remote-printer'] = 'Y' if enablePrinter else 'N'
+    override['enable-camera'] = 'Y' if enableCamera else 'N'
+    override['enable-terminal'] = 'Y' if enableTerminal else 'N'
+    if direction == 'incoming':
+        override['custom-rendezvous-server'] = server
+        override['api-server'] = apiServer
+
+    # Some keys are only read from HARD_SETTINGS and never from a
+    # default-settings/override-settings map.  Route those to the top level
+    # when an advanced user enters them in either manual box.
+    hard_custom_keys = {
+        'conn-type',
+        'password',
+        'salt',
+        'app-name',
+        'disable-installation',
+        'disable-settings',
+        'disable-tcp-listen',
+        'disable-ab',
+        'disable-account',
+    }
+
+    def apply_manual_settings(lines, target):
+        for line in lines.splitlines():
+            if '=' in line:
+                k, value = line.split('=', 1)
+                k = k.strip()
+                value = value.strip()
+                if k in hard_custom_keys:
+                    decodedCustom[k] = value
+                else:
+                    target[k] = value
 
     if defaultManual:
-        for line in defaultManual.splitlines():
-            if '=' in line:
-                k, value = line.split('=', 1)
-                decodedCustom['default-settings'][k.strip()] = value.strip()
+        apply_manual_settings(defaultManual, decodedCustom['default-settings'])
 
     if overrideManual:
-        for line in overrideManual.splitlines():
-            if '=' in line:
-                k, value = line.split('=', 1)
-                decodedCustom['override-settings'][k.strip()] = value.strip()
+        apply_manual_settings(overrideManual, decodedCustom['override-settings'])
     
     decodedCustomJson = json.dumps(decodedCustom)
 
@@ -286,6 +355,10 @@ def generate_custom_client(params, full_url):
         "privacylink_file":privacylink_file,
         "appname":appname,
         "genurl":_settings.GENURL,
+        "themeColor": themeColor,
+        "themeSurfaceLight": themeSurfaceLight,
+        "themeSurfaceDark": themeSurfaceDark,
+        "themeMeColor": themeMeColor,
         "urlLink":urlLink,
         "downloadLink":downloadLink,
         "delayFix": 'true' if delayFix else 'false',
@@ -342,7 +415,7 @@ def generate_custom_client(params, full_url):
         response = requests.post(url, json=data, headers=headers)
         if response.status_code == 204 or response.status_code == 200:
             github_data = response.json()
-            print(github_data)
+            logger.info("%s", github_data)
             new_github_run.github_run_id = github_data.get('workflow_run_id')
             new_github_run.status = "in_progress"
             new_github_run.save()
@@ -402,7 +475,7 @@ def _get_run_status(uuid_val):
                     gh_run.status = gh_data['conclusion']
                     gh_run.save()
         except Exception as e:
-            print(f"Error checking GitHub: {e}")
+            logger.warning(f"Error checking GitHub: {e}")
 
     return {
         "found": True,
@@ -417,7 +490,7 @@ def generator_view(request):
         form = GenerateForm(request.POST, request.FILES)
         if form.is_valid():
             params = form.cleaned_data
-            full_url = f"{_settings.PROTOCOL}://{request.get_host()}" if _settings.GENURL else f"{_settings.PROTOCOL}://{request.get_host()}"
+            full_url = get_full_url(request)
             result = generate_custom_client(params, full_url)
             if result['success']:
                 return render(request, 'waiting.html', {
@@ -451,7 +524,6 @@ def _expected_files_for_platform(filename, platform):
             f"{filename}-aarch64.deb",
             f"{filename}-aarch64.rpm",
             f"{filename}-suse-aarch64.rpm",
-            f"{filename}-aarch64.pkg.tar.zst",
             f"{filename}-x86_64.AppImage",
             f"{filename}-aarch64.AppImage",
             f"{filename}-x86_64.flatpak",
@@ -631,7 +703,7 @@ def startgh(request):
         'X-GitHub-Api-Version': '2026-03-10'
     }
     response = requests.post(url, json=data, headers=headers)
-    print(response)
+    logger.info("%s", response)
     return HttpResponse(status=204)
 
 def save_png(file, uuid, domain, name):
@@ -644,10 +716,10 @@ def save_png(file, uuid, domain, name):
             decoded_img = base64.b64decode(encoded)
             file = ContentFile(decoded_img, name=name) # Create a file-like object
         except ValueError:
-            print("Invalid base64 data")
+            logger.info("Invalid base64 data")
             return None  # Or handle the error as you see fit
         except Exception as e:  # Catch general exceptions during decoding
-            print(f"Error decoding base64: {e}")
+            logger.warning(f"Error decoding base64: {e}")
             return None
         
     with open(file_save_path, "wb+") as f:
@@ -690,9 +762,9 @@ def cleanup_secrets(request):
             file_path = os.path.join(temp_dir, filename)
             try:
                 os.remove(file_path)
-                print(f"Successfully deleted {file_path}")
+                logger.info(f"Successfully deleted {file_path}")
             except OSError as e:
-                print(f"Error deleting file: {e}")
+                logger.warning(f"Error deleting file: {e}")
 
     return HttpResponse("Cleanup successful", status=200)
 
