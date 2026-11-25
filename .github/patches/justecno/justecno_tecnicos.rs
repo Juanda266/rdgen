@@ -81,15 +81,14 @@ pub fn pase(destino: &str) -> Option<u64> {
 }
 
 /// App de clientes: comprueba con el servidor de JUSTECNO que `tecnico` tiene un pase para este equipo.
-/// Devuelve el nombre del técnico (si el servidor lo sabe) para mostrarlo en la ventana de conexión.
-pub async fn verificar(tecnico: &str, sesion: u64) -> Result<Option<String>, String> {
+pub async fn verificar(tecnico: &str, sesion: u64) -> Result<(), String> {
     if crate::get_app_name() != APP_CLIENTE {
-        return Ok(None);
+        return Ok(());
     }
     let equipo = Config::get_id();
     let tecnico = tecnico.to_owned();
     // Err(None): no se pudo hablar con el servidor; Err(Some(motivo)): el servidor dijo que no
-    let r = hbb_common::tokio::task::spawn_blocking(move || -> Result<Option<String>, Option<String>> {
+    let r = hbb_common::tokio::task::spawn_blocking(move || -> Result<(), Option<String>> {
         let r = cliente()
             .get(format!("{}/verificar", URL))
             .query(&[
@@ -106,12 +105,7 @@ pub async fn verificar(tecnico: &str, sesion: u64) -> Result<Option<String>, Str
         let estado = r.status();
         let v: Value = r.json().unwrap_or_default();
         if estado.is_success() {
-            let nombre = v
-                .get("nombre")
-                .and_then(|n| n.as_str())
-                .map(|n| n.trim().chars().take(60).collect::<String>())
-                .filter(|n| !n.is_empty());
-            return Ok(nombre);
+            return Ok(());
         }
         if estado.is_server_error() {
             return Err(None);
@@ -125,7 +119,7 @@ pub async fn verificar(tecnico: &str, sesion: u64) -> Result<Option<String>, Str
     })
     .await;
     match r {
-        Ok(Ok(nombre)) => Ok(nombre),
+        Ok(Ok(())) => Ok(()),
         Ok(Err(Some(motivo))) => Err(motivo),
         _ => Err("No se pudo comprobar con JUSTECNO que quien se conecta es un técnico autorizado. \
                   Revisa el internet de este equipo e intenta de nuevo."
