@@ -470,6 +470,21 @@ jobs:
             "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/justecno/justecno_grabacion.py"
           "$PY" "$RUNNER_TEMP/justecno_grabacion.py"
 
+      # Soporte JUSTECNO: la misma versión en la web, la app y las propiedades del .exe (1.5.3, 1.5.3.1… 1.5.4)
+      # y una sola libreta de direcciones (la compartida) en la app.
+      - name: justecno version y libreta
+        if: env.appname == env.JUSTECNO_APPNAME || env.appname == env.JUSTECNO_APPNAME_TECNICO
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 -c 1 2>/dev/null; then PY=python3; else PY=python; fi
+          for p in justecno_version justecno_libreta; do
+            curl -fsSL --retry 3 -o "$RUNNER_TEMP/$p.py" \
+              "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/justecno/$p.py"
+          done
+          "$PY" "$RUNNER_TEMP/justecno_version.py" windows
+          "$PY" "$RUNNER_TEMP/justecno_libreta.py"
+
       - name: Install LLVM and Clang
         uses: KyleMayes/install-llvm-action@v2
         with:
