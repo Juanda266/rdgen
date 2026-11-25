@@ -10,7 +10,7 @@ Lee la versión publicada de esta app (version.json de soporte.justecno.com) par
 Cambia solo lo que se ve: el número de RustDesk que usa el protocolo (Cargo.toml "version") no se toca.
   - Cargo.toml y libs/portable/Cargo.toml: ProductVersion y FileVersion (texto) del .exe.
   - build.rs y libs/portable/build.rs: FILEVERSION y PRODUCTVERSION (número) del .exe.
-  - Ajustes › Acerca de: la versión que muestra la app.
+  - Ajustes › Acerca de: la versión que muestra la app (PC y Android).
 Falla a propósito si no puede leer version.json o si una versión nueva de RustDesk cambia estas líneas.
 """
 import json
@@ -92,6 +92,18 @@ def main():
         if t.count(viejo) != 1:
             sys.exit("justecno_version: %s cambió" % ajustes)
         escribir(ajustes, t.replace(viejo, "final version = '%s'; // Soporte JUSTECNO" % visible))
+
+    # Android: Ajustes › Acerca de (si una versión nueva cambia estas líneas, se deja como venía)
+    movil = "flutter/lib/mobile/pages/settings_page.dart"
+    if os.path.exists(movil):
+        t = leer(movil)
+        for viejo, nuevo in (('Text(translate("Version: ") + version)', "Text(translate(\"Version: \") + '%s')" % visible),
+                             ("Text('Version: $version')", "Text('Version: %s')" % visible)):
+            if t.count(viejo) == 1:
+                t = t.replace(viejo, nuevo)
+            else:
+                print("justecno_version: aviso, no encontré %r en %s" % (viejo, movil))
+        escribir(movil, t)
 
     env = os.environ.get("GITHUB_ENV")
     if env:

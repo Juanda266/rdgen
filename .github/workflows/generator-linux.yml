@@ -507,6 +507,21 @@ jobs:
           "$PY" "$RUNNER_TEMP/justecno_tecnicos.py"
 
       # Soporte JUSTECNO: grabación de las sesiones con subida en vivo al servidor (solo app de clientes).
+
+      # Soporte JUSTECNO: la misma versión en la web y en la app (1.5.3, 1.5.3.1… 1.5.4) y una sola libreta.
+      - name: justecno version y libreta
+        if: env.appname == 'JUSTECNO' || env.appname == 'JUSTECNO-Tecnico'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 -c 1 2>/dev/null; then PY=python3; else PY=python; fi
+          for p in justecno_version justecno_libreta; do
+            curl -fsSL --retry 3 -o "$RUNNER_TEMP/$p.py" \
+              "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/justecno/$p.py"
+          done
+          "$PY" "$RUNNER_TEMP/justecno_version.py" linux
+          "$PY" "$RUNNER_TEMP/justecno_libreta.py"
+
       - name: justecno grabacion
         if: env.appname == 'JUSTECNO'
         shell: bash
