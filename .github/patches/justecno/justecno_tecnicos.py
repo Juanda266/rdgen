@@ -5,8 +5,7 @@ Se corre desde la carpeta de rustdesk ya descargada (paso "justecno tecnicos" de
 dos apps. El código decide en cada app qué hacer (src/hbbs_http/justecno_tecnicos.rs, que se baja del fork):
   - JUSTECNO Técnico: al conectarse pide un "pase" al servidor de JUSTECNO y lo usa como número de sesión.
   - Soporte JUSTECNO (clientes): antes de aceptar una conexión, pregunta al servidor si ese técnico tiene un pase
-    para este equipo; si no, la rechaza y le dice al técnico por qué. Si lo tiene, la ventana de conexión muestra
-    el nombre del técnico (el de la Cuenta JUSTECNO con que inició sesión en la app), el mismo del correo de la cita.
+    para este equipo; si no, la rechaza y le dice al técnico por qué.
 
 Falla a propósito si una versión nueva de RustDesk cambia las líneas donde se engancha.
 """
@@ -38,19 +37,12 @@ CAMBIOS = [
      "                return false;\n"
      "            }\n"
      "            // Soporte JUSTECNO: solo técnicos de JUSTECNO aprobados (app JUSTECNO Técnico instalada)\n"
-     "            // y el cliente ve el nombre del técnico (el de su Cuenta JUSTECNO) antes de aceptar\n"
-     "            let mut lr = lr;\n"
-     "            match crate::hbbs_http::justecno_tecnicos::verificar(&lr.my_id, lr.session_id).await {\n"
-     "                Err(motivo) => {\n"
-     "                    self.send_login_error(motivo).await;\n"
-     "                    sleep(1.).await;\n"
-     "                    return false;\n"
-     "                }\n"
-     "                Ok(Some(nombre)) => {\n"
-     "                    lr.my_name = format!(\"{} · técnico de JUSTECNO\", nombre);\n"
-     "                    self.lr.my_name = lr.my_name.clone();\n"
-     "                }\n"
-     "                Ok(None) => {}\n"
+     "            if let Err(motivo) =\n"
+     "                crate::hbbs_http::justecno_tecnicos::verificar(&lr.my_id, lr.session_id).await\n"
+     "            {\n"
+     "                self.send_login_error(motivo).await;\n"
+     "                sleep(1.).await;\n"
+     "                return false;\n"
      "            }\n"
      "            match lr.union {\n"),
 ]
