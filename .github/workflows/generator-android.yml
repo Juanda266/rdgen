@@ -391,9 +391,18 @@ jobs:
             convert ./res/icon.png -resize 64x64 ./res/64x64.png
             convert ./res/icon.png -resize 128x128 ./res/128x128.png
             convert ./res/128x128.png -resize 200% ./res/128x128@2x.png
+            # Android only shows the inner 72dp of an adaptive icon's 108dp
+            # foreground layer: the launcher mask crops the outer sixth on each
+            # side. Using the full-bleed icon as the foreground makes the app
+            # icon look zoomed in with its edges cut off, so bake the safe-zone
+            # padding into the foreground image here. (adaptive_icon_foreground_
+            # inset would do this, but it only exists in flutter_launcher_icons
+            # 0.14+ and rustdesk pins ^0.13.1, which silently ignores the key.)
+            # 432px is the xxxhdpi foreground size flutter_launcher_icons
+            # generates; working at that size avoids an upscaled, blurry icon.
+            convert ./res/icon.png -resize 288x288 -background none -gravity center -extent 432x432 ./res/icon_foreground.png
             sed -i '/android: true/a \ \ adaptive_icon_background: "#ffffff"' ./flutter/pubspec.yaml
-            sed -i '/adaptive_icon_background/a \ \ adaptive_icon_foreground: "../res/icon.png"' ./flutter/pubspec.yaml
-            sed -i '/adaptive_icon_foreground:/a \ \ adaptive_icon_foreground_inset: 32' ./flutter/pubspec.yaml
+            sed -i '/adaptive_icon_background/a \ \ adaptive_icon_foreground: "../res/icon_foreground.png"' ./flutter/pubspec.yaml
             sed -i '/ic_launcher_background/d' ./flutter/android/app/src/main/res/values/colors.xml
 
       - name: set server, serverPort, key, and apiserver
@@ -466,8 +475,6 @@ jobs:
           sed -i -e 's|RustDesk|${{ env.appname }}|' ./flutter/android/app/src/main/res/values/strings.xml
           sed -i -e "s|title: 'RustDesk'|title: '${{ env.appname }}'|" ./flutter/lib/main.dart
           sed -i -e "s|return 'RustDesk';|return '${{ env.appname }}';|" ./flutter/lib/web/bridge.dart
-          sed -i 's|android:label="RustDesk"|android:label="${{ env.appname }}"|' ./flutter/android/app/src/main/AndroidManifest.xml
-          sed -i 's|android:label="RustDesk Input"|android:label="${{ env.appname }} Input"|' ./flutter/android/app/src/main/AndroidManifest.xml
           sed -i 's|RustDesk is Open|${{ env.appname }} is Open|' ./flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
           sed -i 's|Show Rustdesk|Show ${{ env.appname }}|' ./flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/FloatingWindowService.kt
           sed -i 's|"RustDesk"|"${{ env.appname }}"|' ./flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
@@ -483,6 +490,66 @@ jobs:
           sed -i -e 's|Purslane Ltd.|${{ env.compname }}|' ./Cargo.toml
           sed -i -e 's|Purslane Ltd.|${{ env.compname }}|' ./libs/portable/Cargo.toml
           sed -i -e 's|Purslane Ltd|${{ env.compname }}|' ./src/main.rs
+
+      # The Android launcher and the package installer show the name from
+      # <application android:label>. The old sed matched the literal
+      # android:label="RustDesk" text, so any upstream change to that line turns
+      # the patch into a silent no-op and the app keeps installing as
+      # "RustDesk". Set the attribute itself and print the result, so a missed
+      # patch is visible in the log instead of shipping.
+      - name: change Android app label to custom
+        if: env.appname != '' && env.appname != 'rustdesk'
+        shell: python
+        run: |
+          import os
+          import re
+          import sys
+
+          path = "flutter/android/app/src/main/AndroidManifest.xml"
+          app_name = os.environ.get("appname", "").strip()
+          if not app_name or app_name.lower() == "rustdesk":
+              print("::error::no custom app name to apply to the Android label")
+              sys.exit(1)
+
+          with open(path, encoding="utf-8") as f:
+              text = f.read()
+
+          match = re.search(r"<application\b[^>]*>", text)
+          if not match:
+              print(f"::error::no <application> element in {path}")
+              sys.exit(1)
+          tag = match.group(0)
+          if "android:label=" in tag:
+              tag = re.sub(
+                  r'android:label="[^"]*"',
+                  lambda m: f'android:label="{app_name}"',
+                  tag,
+                  count=1,
+              )
+          else:
+              tag = tag.replace(
+                  "<application",
+                  f'<application\n        android:label="{app_name}"',
+                  1,
+              )
+          text = text[: match.start()] + tag + text[match.end() :]
+
+          # The accessibility service shows its own label in Android Settings.
+          text = re.sub(
+              r'(<service\b[^>]*android:name="\.InputService"[^>]*?)'
+              r'android:label="[^"]*"',
+              lambda m: f'{m.group(1)}android:label="{app_name} Input"',
+              text,
+              count=1,
+          )
+
+          with open(path, "w", encoding="utf-8", newline="") as f:
+              f.write(text)
+
+          print(f"Android app label -> {app_name}")
+          for line in text.splitlines():
+              if "android:label=" in line:
+                  print("  " + line.strip())
 
       - name: change url to custom
         if: env.urlLink != 'https://rustdesk.com'
@@ -750,21 +817,53 @@ jobs:
           mv ../rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.apk ./${{ env.filename }}-${{ matrix.job.arch }}.apk
           popd
       
+      - name: Check Android signing configuration
+        id: signcheck
+        shell: bash
+        env:
+          KS_B64: ${{ secrets.ANDROID_SIGNING_KEY }}
+          KS_ALIAS: ${{ secrets.ANDROID_ALIAS }}
+          KS_STORE_PASS: ${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
+          KS_KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KS_B64" ] && [ -z "$KS_ALIAS" ] && [ -z "$KS_STORE_PASS" ]; then
+            echo "::warning::No Android signing secrets set. APKs will be debug-signed: not publishable, and they cannot update an installed app."
+            echo "sign_enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          missing=""
+          [ -n "$KS_B64" ] || missing="ANDROID_SIGNING_KEY"
+          [ -n "$KS_ALIAS" ] || missing="$missing ANDROID_ALIAS"
+          [ -n "$KS_STORE_PASS" ] || missing="$missing ANDROID_KEY_STORE_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::Android signing is partially configured; missing secret(s): $missing"
+            exit 1
+          fi
+          # PKCS#12 keystores normally use one password for store and key.
+          [ -n "$KS_KEY_PASS" ] || KS_KEY_PASS="$KS_STORE_PASS"
+          {
+            echo "KS_B64=$KS_B64"
+            echo "KS_ALIAS=$KS_ALIAS"
+            echo "KS_STORE_PASS=$KS_STORE_PASS"
+            echo "KS_KEY_PASS=$KS_KEY_PASS"
+          } >> "$GITHUB_ENV"
+          echo "sign_enabled=true" >> "$GITHUB_OUTPUT"
+          echo "Android signing key found; alias=$KS_ALIAS"
+
       - uses: r0adkll/sign-android-release@v1
         name: Sign app APK
-        continue-on-error: true
-        if: env.ANDROID_SIGNING_KEY != null
+        if: steps.signcheck.outputs.sign_enabled == 'true'
         id: sign-rustdesk
         with:
           releaseDirectory: ./signed-apk
-          signingKeyBase64: ${{ secrets.ANDROID_SIGNING_KEY }}
-          alias: ${{ secrets.ANDROID_ALIAS }}
-          keyStorePassword: ${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
-          keyPassword: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          signingKeyBase64: ${{ env.KS_B64 }}
+          alias: ${{ env.KS_ALIAS }}
+          keyStorePassword: ${{ env.KS_STORE_PASS }}
+          keyPassword: ${{ env.KS_KEY_PASS }}
         env:
           # override default build-tools version (29.0.3) -- optional
           # 30.0.2 no longer ships on ubuntu-24.04 runners (34.0.0 does);
-          # missing dir made the sign step fail silently via continue-on-error
+          # a missing build-tools dir made the sign step fail silently
           BUILD_TOOLS_VERSION: "34.0.0"
 
       - name: Prefer signed APK when available
@@ -777,10 +876,22 @@ jobs:
           plain="./signed-apk/${{ env.filename }}-${{ matrix.job.arch }}.apk"
           signed="./signed-apk/${{ env.filename }}-${{ matrix.job.arch }}-signed.apk"
           if [ -f "$signed" ]; then
+            # Prove which certificate ended up in the APK instead of trusting
+            # the step above: this is what a user compares with their keystore.
+            apksigner_bin=$(command -v apksigner || true)
+            [ -n "$apksigner_bin" ] || apksigner_bin="$ANDROID_HOME/build-tools/34.0.0/apksigner"
+            if [ -x "$apksigner_bin" ]; then
+              "$apksigner_bin" verify --print-certs "$signed"
+            else
+              echo "::warning::apksigner not found, skipping signature verification"
+            fi
             mv "$signed" "$plain"
             echo "Using release-signed APK: $plain"
+          elif [ "${{ steps.signcheck.outputs.sign_enabled }}" = "true" ]; then
+            echo "::error::An Android signing key is configured but no signed APK was produced (see the 'Sign app APK' step)."
+            exit 1
           else
-            echo "No signed APK found, keeping unsigned/debug APK: $plain"
+            echo "No signing key configured, keeping debug-signed APK: $plain"
           fi
           ls -l ./signed-apk/
 
