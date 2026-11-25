@@ -13,7 +13,10 @@ pero en la versión gratuita nunca se activa. Aquí:
   4. al terminar, cuando el servidor ya tiene todo, borra la grabación del equipo del cliente;
   5. la ventana de conexión del cliente avisa "Esta sesión se graba por seguridad";
   6. también sube lo que pasa por la terminal (lo que escribe el técnico y lo que responde el equipo) y una
-     copia de cada archivo que se transfiere (src/hbbs_http/justecno_registro.rs, que se baja del fork).
+     copia de cada archivo que se transfiere (src/hbbs_http/justecno_registro.rs, que se baja del fork);
+  7. y el audio: lo que suena en el equipo del cliente y su voz, y la voz del técnico en las llamadas de voz
+     (paquetes Opus tal cual, con la hora), más la hora en que empieza cada grabación para alinearlos. El
+     servidor arma un .ogg por lado y una copia de cada grabación con el audio unido.
 
 Falla a propósito si una versión nueva de RustDesk cambia las líneas donde se engancha.
 """
@@ -29,7 +32,7 @@ HBBS = "src/hbbs_http.rs"
 CONEXION = "src/server/connection.rs"
 TERMINAL = "src/server/terminal_service.rs"
 REGISTRO = "src/hbbs_http/justecno_registro.rs"
-AVISO = "Esta sesión se graba por seguridad"
+AVISO = "Esta sesión se graba (pantalla y voz) por seguridad"
 
 CAMBIOS = [
     (SUBIDA,
@@ -161,6 +164,39 @@ CAMBIOS = [
      "    fn create_terminal_data_response(terminal_id: i32, data: Vec<u8>) -> TerminalResponse {\n"
      "        // Soporte JUSTECNO: lo que responde el equipo\n"
      "        crate::hbbs_http::justecno_registro::terminal(false, terminal_id, &data);\n"),
+    # audio: lo que llega del técnico (su voz en la llamada) y su formato
+    (CONEXION,
+     "                Some(message::Union::AudioFrame(frame)) => {\n                    if !self.disable_audio {\n",
+     "                Some(message::Union::AudioFrame(frame)) => {\n"
+     "                    crate::hbbs_http::justecno_registro::audio(true, &frame.data); // Soporte JUSTECNO\n"
+     "                    if !self.disable_audio {\n"),
+    (CONEXION,
+     "                    Some(misc::Union::AudioFormat(format)) => {\n                        if !self.disable_audio {\n",
+     "                    Some(misc::Union::AudioFormat(format)) => {\n"
+     "                        crate::hbbs_http::justecno_registro::audio_formato(true, format.channels); // Soporte JUSTECNO\n"
+     "                        if !self.disable_audio {\n"),
+    # audio: lo que sale hacia el técnico (sonido del equipo y voz del cliente) y su formato
+    (CONEXION,
+     "                    #[allow(unused_mut)]\n                    let mut msg = value;\n\n                    if latency > 1000 {\n",
+     "                    #[allow(unused_mut)]\n                    let mut msg = value;\n"
+     "                    // Soporte JUSTECNO: el audio que sale del equipo del cliente también se graba\n"
+     "                    match &msg.union {\n"
+     "                        Some(message::Union::AudioFrame(f)) => {\n"
+     "                            crate::hbbs_http::justecno_registro::audio(false, &f.data);\n"
+     "                        }\n"
+     "                        Some(message::Union::Misc(m)) => {\n"
+     "                            if let Some(misc::Union::AudioFormat(af)) = &m.union {\n"
+     "                                crate::hbbs_http::justecno_registro::audio_formato(false, af.channels);\n"
+     "                            }\n"
+     "                        }\n"
+     "                        _ => {}\n"
+     "                    }\n"
+     "\n                    if latency > 1000 {\n"),
+    # hora en que empieza cada grabación (para alinear el audio con el video)
+    (SUBIDA,
+     "                    self.filepath = filepath.clone();\n",
+     "                    self.filepath = filepath.clone();\n"
+     "                    crate::hbbs_http::justecno_registro::grabacion_inicio(&filename); // Soporte JUSTECNO\n"),
     # aviso al cliente en la ventana de conexión (PC)
     (CM_PC,
      "                SizedBox(height: 10.0),\n                FittedBox(\n                    child: Row(\n",
@@ -203,7 +239,7 @@ def main():
         url = (f"https://raw.githubusercontent.com/{os.environ['GITHUB_REPOSITORY']}/{os.environ['GITHUB_SHA']}"
                "/.github/patches/justecno/justecno_registro.rs")
         rust = urllib.request.urlopen(url, timeout=60).read()
-    if b"pub fn terminal(" not in rust:
+    if b"pub fn terminal(" not in rust or b"pub fn audio(" not in rust:
         sys.exit("justecno_grabacion: justecno_registro.rs no es el esperado")
     for ruta, t in textos.items():
         open(ruta, "w", encoding="utf-8").write(t)
