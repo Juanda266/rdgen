@@ -2,8 +2,6 @@
 //
 // - Terminal: lo que escribe el técnico y lo que responde el equipo, tal cual (bytes en base64).
 // - Archivos: cada archivo que el técnico manda al equipo o se lleva de él, con una copia completa.
-// - Audio: los paquetes Opus que salen del equipo (su sonido y la voz del cliente) y los que llegan del técnico
-//   (su voz en la llamada), con la hora; y la hora en que empieza cada grabación, para unirlos con el video.
 //
 // Todo va a https://justecno.com/jt-grabaciones (servicio justecno-grabaciones), que lo guarda en la carpeta
 // de la sesión abierta de este equipo. Si se cae el internet se reintenta; nada de esto frena la sesión.
@@ -220,28 +218,4 @@ fn copiar(
             return Ok(());
         }
     }
-}
-
-/// Audio de la sesión (paquetes Opus). `tecnico` = lo que llega del técnico; si no, lo que sale del equipo.
-pub fn audio(tecnico: bool, datos: &[u8]) {
-    if datos.is_empty() {
-        return;
-    }
-    evento(json!({
-        "t": ahora_ms(), "tipo": "audio", "lado": if tecnico { "tecnico" } else { "cliente" },
-        "b": crate::encode64(datos),
-    }));
-}
-
-/// Formato del audio de cada lado (canales: 1 o 2; Opus siempre a 48 kHz).
-pub fn audio_formato(tecnico: bool, canales: u32) {
-    evento(json!({
-        "t": ahora_ms(), "tipo": "audio_formato", "lado": if tecnico { "tecnico" } else { "cliente" },
-        "canales": canales,
-    }));
-}
-
-/// Empieza una grabación de pantalla (nombre del archivo que se sube): marca de tiempo para alinear el audio.
-pub fn grabacion_inicio(archivo: &str) {
-    evento(json!({"t": ahora_ms(), "tipo": "grabacion_inicio", "archivo": archivo}));
 }
