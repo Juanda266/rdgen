@@ -11,10 +11,10 @@
 //   este equipo, comprueba su SHA-256 con el de version.json y lo instala encima (conserva
 //   ID y ajustes): Windows .exe "--update" (UAC), Mac .dmg "--update" (clave del Mac),
 //   Linux .deb/.rpm/.pkg.tar.zst con pkexec. Si algo falla, queda el botón de la página.
-// - JustecnoAliasCard: inicio de sesión con la Cuenta JUSTECNO (obligatorio para recibir soporte).
-//   Sin sesión, un aviso que no se cierra abre soporte.justecno.com/conectar-equipo/ en el navegador;
-//   allí el cliente entra o crea su cuenta (correo verificado) y conecta el equipo. Los técnicos ven
-//   el equipo en su libreta con el nombre de la cuenta (rustdesk.justecno.com/app-api/v1/sesion).
+// - JustecnoAliasCard: inicio de sesión con la Cuenta JUSTECNO (obligatorio para recibir soporte), dentro de
+//   la app: correo y código, o crear la cuenta ahí mismo (justecno_cuenta.dart). Al abrir la app pide el PIN,
+//   la huella o la cara del equipo; y «Permitir que un técnico entre sin que estés» por unas horas. Los técnicos
+//   ven el equipo en su libreta con el nombre de la cuenta (rustdesk.justecno.com/app-api/v1/sesion).
 // - JustecnoMantenimiento (va dentro de JustecnoUpdateCard, así sale en las dos apps): lee el
 //   mantenimiento programado en soporte.justecno.com/wp-json/justecno/v1/mantenimiento. Desde 2 días
 //   antes muestra el aviso; en los últimos 30 minutos, la cuenta regresiva. A los 30, 10, 5 y 1 minuto
@@ -30,6 +30,8 @@ import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
+
+import '../../common/widgets/justecno_cuenta.dart';
 
 // Número de compilación propio. El workflow lo reemplaza (JUSTECNO_BUILD).
 const int kJustecnoBuild = 0;
@@ -853,13 +855,13 @@ class _JustecnoActualizacionState extends State<_JustecnoActualizacion> {
 }
 
 // ---------------------------------------------------------------------------
-// Sesión con la Cuenta JUSTECNO (antes: nombre y usuario escritos en la app)
+// Sesión con la Cuenta JUSTECNO y confirmación con el PIN, la huella o la cara
 // ---------------------------------------------------------------------------
 // Al abrir la app pregunta a rustdesk.justecno.com/app-api/v1/sesion si este equipo ya está conectado a una
-// cuenta. Si no, muestra un aviso que no se cierra: «Iniciar sesión» pide un código de un solo uso
-// (v1/sesion/iniciar) y abre en el navegador soporte.justecno.com/conectar-equipo/?c=CODIGO, donde el cliente
-// entra o crea su cuenta (correo verificado con un código) y pulsa «Conectar este equipo». Mientras tanto la app
-// pregunta cada 5 segundos; cuando queda conectada, el aviso se cierra solo y la tarjeta muestra el nombre.
+// cuenta. Si no, un aviso que no se cierra pide el correo y un código (o crea la cuenta) dentro de la misma app
+// (JtCuentaDialogo, en justecno_cuenta.dart). Si ya lo está, pide el PIN, la huella o la cara (o un código al
+// correo) antes de usar la app, y otra vez si la ventana estuvo más de 10 minutos sin usarse.
+// La tarjeta muestra la cuenta, «Cerrar sesión» y «Permitir que un técnico entre sin que estés».
 // Los técnicos solo ven en su libreta los equipos conectados a una cuenta.
 // Sin red o si el servidor no responde, no bloquea (reintenta cada minuto).
 
@@ -870,55 +872,48 @@ class JustecnoAliasCard extends StatefulWidget {
   State<JustecnoAliasCard> createState() => _JustecnoAliasCardState();
 }
 
-class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
+class _JustecnoAliasCardState extends State<JustecnoAliasCard> with WindowListener {
   static const String _kSesionUrl = 'https://rustdesk.justecno.com/app-api/v1/sesion';
+  static const Duration _kBloquearTras = Duration(minutes: 10);
 
-  final _cambio = ValueNotifier<int>(0);
   Timer? _retry;
-  Timer? _espera;
-  DateTime? _esperaHasta;
+  Timer? _reloj;
   int _retries = 0;
   bool _cargado = false;
   bool _conectado = false;
+  bool _dialogo = false;
+  bool _cerrando = false;
   String _nombre = '';
   String _usuario = '';
-  String _url = '';
-  bool _abriendo = false;
-  bool _cerrando = false;
   String _mensaje = '';
   bool _mensajeError = false;
-  bool _dialogoAbierto = false;
-  NavigatorState? _navDialogo;
+  DateTime? _acceso;
+  DateTime? _sinUsarDesde;
 
   @override
   void initState() {
     super.initState();
+    windowManager.addListener(this);
     _load();
+    _leerAcceso();
+    _reloj = Timer.periodic(const Duration(minutes: 1), (_) => _leerAcceso());
   }
 
   @override
   void dispose() {
+    windowManager.removeListener(this);
     _retry?.cancel();
-    _espera?.cancel();
-    _cambio.dispose();
+    _reloj?.cancel();
     super.dispose();
   }
 
   void _set(VoidCallback f) {
-    if (!mounted) return;
-    setState(f);
-    _cambio.value++;
+    if (mounted) setState(f);
   }
 
-  Future<Map<String, String>?> _ids() async {
-    try {
-      final id = (await bind.mainGetMyId()).trim();
-      final uuid = (await bind.mainGetUuid()).trim();
-      if (id.isEmpty || uuid.isEmpty) return null;
-      return {'id': id, 'uuid': uuid};
-    } catch (_) {
-      return null;
-    }
+  Future<void> _leerAcceso() async {
+    final a = await jtAccesoHasta();
+    _set(() => _acceso = a);
   }
 
   void _scheduleRetry() {
@@ -930,107 +925,81 @@ class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
     _retry = Timer(const Duration(minutes: 1), _load);
   }
 
-  String _texto(dynamic v) => v is String ? v : '';
-
-  // null: no se pudo saber (sin red, el equipo aún no se reporta…)
-  Future<bool?> _consultar() async {
-    final ids = await _ids();
-    if (ids == null) return null;
-    try {
-      final uri = Uri.parse(_kSesionUrl).replace(queryParameters: ids);
-      final resp =
-          await http.get(uri, headers: await _headers()).timeout(_kTimeout);
-      final data = jsonDecode(utf8.decode(resp.bodyBytes));
-      if (resp.statusCode == 200 && data is Map && data['ok'] == true) {
-        final conectado = data['conectado'] == true;
-        _set(() {
-          _cargado = true;
-          _conectado = conectado;
-          _nombre = _texto(data['nombre']);
-          _usuario = _texto(data['usuario']);
-        });
-        return conectado;
-      }
-    } catch (_) {}
-    return null;
-  }
-
   Future<void> _load() async {
-    final conectado = await _consultar();
-    if (conectado == null) {
+    final s = await jtSesionActual();
+    if (s == null) {
       _scheduleRetry();
-    } else if (!conectado) {
-      _mostrarDialogo();
+      return;
+    }
+    _set(() {
+      _cargado = true;
+      _conectado = s.isNotEmpty;
+      _nombre = s['nombre'] ?? '';
+      _usuario = s['usuario'] ?? '';
+    });
+    if (_conectado) {
+      await _desbloquear();
+    } else {
+      await _iniciarSesion();
     }
   }
 
-  Future<void> _iniciar() async {
-    if (_abriendo) return;
-    _set(() {
-      _abriendo = true;
-      _mensaje = '';
-    });
-    final ids = await _ids();
-    var error = 'No se pudo abrir el inicio de sesión. Revisa tu conexión a internet e inténtalo de nuevo.';
-    if (ids != null) {
-      try {
-        final resp = await http
-            .post(Uri.parse('$_kSesionUrl/iniciar'),
-                headers: await _headers(json: true), body: jsonEncode(ids))
-            .timeout(_kTimeout);
-        final data = jsonDecode(utf8.decode(resp.bodyBytes));
-        if (resp.statusCode == 200 && data is Map && data['ok'] == true &&
-            _texto(data['url']).startsWith('https://soporte.justecno.com/')) {
-          _url = _texto(data['url']);
-          error = '';
-        } else if (data is Map && data['error'] is String) {
-          error = data['error'] as String;
-        }
-      } catch (_) {}
-    }
-    if (error.isEmpty) {
-      await _abrirPagina();
-      _esperar();
-    }
-    _set(() {
-      _abriendo = false;
-      _mensaje = error;
-      _mensajeError = error.isNotEmpty;
-    });
-  }
-
-  Future<void> _abrirPagina() async {
-    if (_url.isEmpty) return;
+  Future<void> _alFrente() async {
     try {
-      await launchUrl(Uri.parse(_url), mode: LaunchMode.externalApplication);
+      await windowManager.show();
+      await windowManager.focus();
     } catch (_) {}
   }
 
-  // Pregunta cada 5 segundos mientras el cliente termina en el navegador (el enlace dura 20 minutos)
-  void _esperar() {
-    _esperaHasta = DateTime.now().add(const Duration(minutes: 20));
-    _espera?.cancel();
-    _espera = Timer.periodic(const Duration(seconds: 5), (t) async {
-      if (!mounted || DateTime.now().isAfter(_esperaHasta!)) {
-        t.cancel();
-        _set(() => _url = '');
-        return;
-      }
-      if (await _consultar() == true) {
-        t.cancel();
-        _set(() {
-          _url = '';
-          _mensaje = '¡Listo, $_nombre! Ya puedes recibir soporte.';
-          _mensajeError = false;
-        });
-        try {
-          await windowManager.show();
-          await windowManager.focus();
-        } catch (_) {}
-        _navDialogo?.pop();
-      }
-    });
-    _set(() {});
+  Future<void> _iniciarSesion() async {
+    if (_dialogo || !mounted || _conectado) return;
+    _dialogo = true;
+    await _alFrente();
+    if (!mounted) {
+      _dialogo = false;
+      return;
+    }
+    final c = await jtMostrarInicioSesion(context);
+    _dialogo = false;
+    if (c != null) {
+      _set(() {
+        _conectado = true;
+        _nombre = c['nombre'] ?? '';
+        _usuario = c['usuario'] ?? '';
+        _mensaje = '¡Listo, $_nombre! Ya puedes recibir soporte. Desde ahora, al abrir la app y antes de que '
+            'entre un técnico, te pediremos ${jtNombreMetodo()}.';
+        _mensajeError = false;
+      });
+      await _alFrente();
+    }
+  }
+
+  // Al abrir la app (y tras un rato sin usarla): que sea la persona de la cuenta
+  Future<void> _desbloquear() async {
+    if (_dialogo || !mounted || !_conectado) return;
+    if (await jtAccesoVigente()) return; // la dejó abierta a propósito para que entre un técnico
+    _dialogo = true;
+    await jtVerificarPersona(context,
+        titulo: 'Desbloquea Soporte JUSTECNO',
+        motivo: 'Confirma que eres tú para usar Soporte JUSTECNO',
+        obligatorio: true,
+        fondo: Colors.black.withOpacity(0.92));
+    _dialogo = false;
+  }
+
+  @override
+  void onWindowBlur() => _sinUsarDesde ??= DateTime.now();
+
+  @override
+  void onWindowMinimize() => _sinUsarDesde ??= DateTime.now();
+
+  @override
+  void onWindowFocus() {
+    final desde = _sinUsarDesde;
+    _sinUsarDesde = null;
+    if (desde != null && DateTime.now().difference(desde) > _kBloquearTras && !jtVerificadoHace(_kBloquearTras)) {
+      _desbloquear();
+    }
   }
 
   Future<void> _cerrarSesion() async {
@@ -1038,31 +1007,26 @@ class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('¿Cerrar la sesión en este equipo?'),
-        content: const Text(
-            'Los técnicos ya no verán este equipo hasta que vuelvas a iniciar sesión.'),
+        content: const Text('Los técnicos ya no verán este equipo hasta que vuelvas a iniciar sesión.'),
         actions: [
-          TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('Cancelar')),
-          TextButton(
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: const Text('Cerrar sesión')),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancelar')),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Cerrar sesión')),
         ],
       ),
     );
     if (ok != true) return;
     _set(() => _cerrando = true);
-    final ids = await _ids();
+    final ids = await jtIds();
     var listo = false;
     if (ids != null) {
       try {
         final resp = await http
-            .post(Uri.parse('$_kSesionUrl/cerrar'),
-                headers: await _headers(json: true), body: jsonEncode(ids))
+            .post(Uri.parse('$_kSesionUrl/cerrar'), headers: await _headers(json: true), body: jsonEncode(ids))
             .timeout(_kTimeout);
         listo = resp.statusCode == 200;
       } catch (_) {}
     }
+    if (listo) await jtGuardarAcceso(null);
     _set(() {
       _cerrando = false;
       _mensaje = listo ? '' : 'No se pudo cerrar la sesión. Revisa tu conexión.';
@@ -1071,132 +1035,62 @@ class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
         _conectado = false;
         _nombre = '';
         _usuario = '';
+        _acceso = null;
       }
     });
-    if (listo) _mostrarDialogo();
+    if (listo) _iniciarSesion();
   }
 
-  // Aviso que no se puede cerrar mientras el equipo no esté conectado a una cuenta.
-  void _mostrarDialogo() {
-    if (_dialogoAbierto || !mounted || _conectado) return;
-    _dialogoAbierto = true;
-    () async {
-      try {
-        await windowManager.show();
-        await windowManager.focus();
-      } catch (_) {}
-      if (!mounted) {
-        _dialogoAbierto = false;
-        return;
-      }
-      await showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (ctx) {
-          _navDialogo = Navigator.of(ctx);
-          return PopScope(
-            canPop: false,
-            child: AlertDialog(
-              title: const Text('Inicia sesión para recibir soporte'),
-              content: SizedBox(
-                width: 460,
-                child: ValueListenableBuilder<int>(
-                  valueListenable: _cambio,
-                  builder: (_, __, ___) => Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: _contenidoDialogo(),
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
-      );
-      _navDialogo = null;
-      _dialogoAbierto = false;
-    }();
-  }
-
-  Widget _paso(String numero, String texto) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+  // «Permitir que un técnico entre sin que estés»: unas horas, confirmando con el PIN, la huella o la cara
+  Future<void> _permitirAcceso() async {
+    final horas = await showDialog<int>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('¿Por cuánto tiempo?'),
         children: [
-          SizedBox(
-              width: 22,
-              child: Text(numero,
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14))),
-          Expanded(child: Text(texto, style: const TextStyle(fontSize: 14))),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(24, 0, 24, 8),
+            child: Text(
+                'Mientras dure, un técnico de JUSTECNO podrá entrar a este equipo sin que tengas que aceptar. '
+                'Úsalo solo si acordaste con el técnico que trabaje cuando no estés. Deja el equipo prendido.',
+                style: TextStyle(fontSize: 13)),
+          ),
+          for (final h in const [2, 8, 24])
+            SimpleDialogOption(
+              onPressed: () => Navigator.of(ctx).pop(h),
+              child: Text(h == 24 ? '24 horas' : '$h horas', style: const TextStyle(fontSize: 15)),
+            ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(ctx).pop(0),
+            child: Text('Cancelar', style: TextStyle(color: Theme.of(ctx).hintColor)),
+          ),
         ],
       ),
     );
+    if (horas == null || horas <= 0 || !mounted) return;
+    final ok = await jtVerificarPersona(context,
+        titulo: 'Confirma que eres tú', motivo: 'Confirma que eres tú para permitir el acceso sin estar presente');
+    if (!ok) return;
+    await jtGuardarAcceso(Duration(hours: horas));
+    await _leerAcceso();
   }
 
-  List<Widget> _contenidoDialogo() {
-    final esperando = _url.isNotEmpty;
-    final children = <Widget>[
-      const Text(
-          'Así el técnico sabe quién eres antes de conectarse a tu equipo. '
-          'Solo se hace una vez.',
-          style: TextStyle(fontSize: 14)),
-      const SizedBox(height: 6),
-      _paso('1.', 'Pulsa «Iniciar sesión». Se abre tu navegador.'),
-      _paso('2.', 'Entra a tu Cuenta JUSTECNO o créala. Te enviamos un código a tu correo.'),
-      _paso('3.', 'Pulsa «Conectar este equipo» y vuelve aquí.'),
-      const SizedBox(height: 10),
-      const Text(
-          '¿Necesitas ayuda? En la página, el botón «Escuchar cómo hacerlo» te explica todo en voz alta.',
-          style: TextStyle(fontSize: 13)),
-      const SizedBox(height: 14),
-    ];
-    if (esperando) {
-      children.addAll([
-        const Text('Esperando a que termines en el navegador…',
-            style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 8),
-        const LinearProgressIndicator(),
-        const SizedBox(height: 10),
-        OutlinedButton(
-          onPressed: _abrirPagina,
-          child: const Text('Abrir otra vez la página'),
-        ),
-      ]);
-    } else {
-      children.add(SizedBox(
-        height: 44,
-        child: ElevatedButton(
-          style: ElevatedButton.styleFrom(
-              backgroundColor: _kBlue, foregroundColor: Colors.white),
-          onPressed: _abriendo ? null : _iniciar,
-          child: Text(_abriendo ? 'Abriendo…' : 'Iniciar sesión',
-              style: const TextStyle(fontSize: 15)),
-        ),
-      ));
-    }
-    if (_mensaje.isNotEmpty && _mensajeError) {
-      children.addAll([
-        const SizedBox(height: 8),
-        Text(_mensaje, style: const TextStyle(fontSize: 13, color: Colors.red)),
-      ]);
-    }
-    return children;
+  Future<void> _quitarAcceso() async {
+    await jtGuardarAcceso(null);
+    await _leerAcceso();
   }
 
   @override
   Widget build(BuildContext context) {
     if (!_cargado) return const SizedBox.shrink();
+    final gris = TextStyle(fontSize: 12, color: Theme.of(context).hintColor);
     final children = <Widget>[];
     if (_conectado) {
       children.addAll([
-        const Text('Sesión iniciada',
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+        const Text('Sesión iniciada', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
         const SizedBox(height: 4),
         Text(_nombre, style: const TextStyle(fontSize: 13)),
-        if (_usuario.isNotEmpty)
-          Text('Usuario: $_usuario',
-              style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor)),
+        if (jtUsuarioDistinto(_nombre, _usuario)) Text('Usuario: $_usuario', style: gris),
         Align(
           alignment: Alignment.centerRight,
           child: TextButton(
@@ -1204,6 +1098,24 @@ class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
             child: Text(_cerrando ? 'Cerrando…' : 'Cerrar sesión'),
           ),
         ),
+        const Divider(height: 12),
+        if (_acceso != null) ...[
+          const Text('Acceso sin estar presente: activado',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+          const SizedBox(height: 2),
+          Text('Un técnico de JUSTECNO puede entrar sin que aceptes hasta las ${_hora(_acceso!)}.', style: gris),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(onPressed: _quitarAcceso, child: const Text('Quitar ahora')),
+          ),
+        ] else ...[
+          Text('Cuando un técnico se conecte, te pediremos ${jtNombreMetodo()} para dejarlo entrar.', style: gris),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+                onPressed: _permitirAcceso, child: const Text('Permitir que entre sin que estés')),
+          ),
+        ],
       ]);
     } else {
       children.addAll([
@@ -1211,9 +1123,8 @@ class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
             style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
         const SizedBox(height: 8),
         ElevatedButton(
-          style: ElevatedButton.styleFrom(
-              backgroundColor: _kBlue, foregroundColor: Colors.white),
-          onPressed: _mostrarDialogo,
+          style: ElevatedButton.styleFrom(backgroundColor: _kBlue, foregroundColor: Colors.white),
+          onPressed: _iniciarSesion,
           child: const Text('Iniciar sesión'),
         ),
       ]);
@@ -1222,9 +1133,7 @@ class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
       children.add(Padding(
         padding: const EdgeInsets.only(top: 6),
         child: Text(_mensaje,
-            style: TextStyle(
-                fontSize: 12,
-                color: _mensajeError ? Colors.red : Colors.green.shade700)),
+            style: TextStyle(fontSize: 12, color: _mensajeError ? Colors.red : Colors.green.shade700)),
       ));
     }
     return _card(context, children);
