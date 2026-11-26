@@ -16,12 +16,6 @@ solo para la app de clientes ("Soporte JUSTECNO").
      "minimo", un aviso que no se cierra hasta actualizar. "Actualizar ahora" abre el .apk de este celular
      (arm64 o armv7) y Android lo descarga e instala encima (misma firma: conserva el ID).
      El build sale de JUSTECNO_BUILD (número de ejecución del workflow); sin él no bloquea nunca.
-     Desde 1.5.3.2 la app descarga el .apk ella misma y abre el instalador de Android. Si no tiene el permiso
-     "Instalar apps desconocidas", abre esa pantalla de Ajustes (solo de esta app); al volver con el permiso
-     activado, la actualización sigue sola. Si algo falla, abre la descarga en el navegador como antes.
-     (AndroidManifest: REQUEST_INSTALL_PACKAGES y un FileProvider; MainActivity: método "jt_instalar_apk".)
-  5. Inicio de sesión con la Cuenta JUSTECNO (como en PC): sin sesión, un aviso que no se cierra abre
-     soporte.justecno.com/conectar-equipo/ en el navegador; al volver, la app ya muestra el nombre de la cuenta.
 
 Falla a propósito si una versión nueva de RustDesk cambia las líneas donde se engancha.
 """
@@ -34,8 +28,6 @@ SERVIDOR = "flutter/lib/mobile/pages/server_page.dart"
 IMPORTS = ("import 'dart:async';\n",
            "import 'dart:async';\n"
            "import 'dart:convert' as jtconv; // Soporte JUSTECNO\n"
-           "import 'dart:io' as jtio;\n"
-           "import 'package:path_provider/path_provider.dart' as jtpath;\n"
            "import 'package:device_info_plus/device_info_plus.dart' as jtdev;\n"
            "import 'package:http/http.dart' as jthttp;\n"
            "import 'package:url_launcher/url_launcher.dart' as jturl;\n")
@@ -67,17 +59,6 @@ class _JtActualizacionState extends State<JtActualizacion>
   String _version = '';
   String _archivo = '';
   String _pagina = 'https://soporte.justecno.com/soporte/';
-  static const String _kInstalar = 'android.permission.REQUEST_INSTALL_PACKAGES';
-  bool _esperandoPermiso = false;
-  bool _descargando = false;
-  double? _progreso;
-  String _estado = '';
-
-  void _set(VoidCallback f) {
-    if (!mounted) return;
-    setState(f);
-    _cambio.value++;
-  }
 
   @override
   void initState() {
@@ -96,10 +77,7 @@ class _JtActualizacionState extends State<JtActualizacion>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      if (_esperandoPermiso) _seguirTrasPermiso();
-      _revisar();
-    }
+    if (state == AppLifecycleState.resumed) _revisar();
   }
 
   Future<void> _revisar() async {
@@ -156,7 +134,7 @@ class _JtActualizacionState extends State<JtActualizacion>
     }
   }
 
-  Future<void> _abrirNavegador() async {
+  Future<void> _actualizar() async {
     final url = _archivo.isNotEmpty ? '$_kJtDescargas$_archivo' : _pagina;
     try {
       await jturl.launchUrl(Uri.parse(url),
@@ -164,114 +142,10 @@ class _JtActualizacionState extends State<JtActualizacion>
     } catch (_) {}
   }
 
-  // Descarga e instala desde la app. Sin el permiso "Instalar apps desconocidas", primero abre esa
-  // pantalla de Ajustes; al volver con el permiso activado sigue sola (didChangeAppLifecycleState).
-  Future<void> _actualizar() async {
-    if (_descargando) return;
-    if (_archivo.isEmpty) return _abrirNavegador();
-    var permitido = false;
-    try {
-      permitido = await AndroidPermissionManager.check(_kInstalar);
-    } catch (_) {}
-    if (!permitido) {
-      _set(() {
-        _esperandoPermiso = true;
-        _estado = 'Activa «Permitir de esta fuente» (o «Permitir apps de esta fuente») y vuelve '
-            'a esta app: la actualización sigue sola. Si la app se reinicia, toca otra vez '
-            '«Actualizar ahora».';
-      });
-      try {
-        AndroidPermissionManager.request(_kInstalar).then((ok) {
-          if (ok) _seguirTrasPermiso();
-        });
-      } catch (_) {
-        _set(() => _esperandoPermiso = false);
-        await _abrirNavegador();
-      }
-      return;
-    }
-    await _descargarEInstalar();
-  }
-
-  Future<void> _seguirTrasPermiso() async {
-    if (!_esperandoPermiso || _descargando) return;
-    var permitido = false;
-    try {
-      permitido = await AndroidPermissionManager.check(_kInstalar);
-    } catch (_) {}
-    if (!permitido) return;
-    _set(() => _esperandoPermiso = false);
-    await _descargarEInstalar();
-  }
-
-  Future<void> _descargarEInstalar() async {
-    if (_descargando) return;
-    _set(() {
-      _descargando = true;
-      _progreso = null;
-      _estado = 'Descargando la versión nueva…';
-    });
-    try {
-      final base = await jtpath.getTemporaryDirectory();
-      final dir = jtio.Directory('${base.path}/jt-actualizacion');
-      if (await dir.exists()) await dir.delete(recursive: true);
-      await dir.create(recursive: true);
-      final f = jtio.File('${dir.path}/${_archivo.split('/').last}');
-      final cliente = jthttp.Client();
-      try {
-        final resp = await cliente
-            .send(jthttp.Request('GET', Uri.parse('$_kJtDescargas$_archivo')))
-            .timeout(const Duration(seconds: 30));
-        if (resp.statusCode != 200) throw Exception('descarga ${resp.statusCode}');
-        final total = resp.contentLength ?? 0;
-        var bajado = 0;
-        final out = f.openWrite();
-        try {
-          await for (final c in resp.stream.timeout(const Duration(seconds: 60))) {
-            out.add(c);
-            bajado += c.length;
-            if (total > 0) _set(() => _progreso = bajado / total);
-          }
-        } finally {
-          await out.close();
-        }
-        if (total > 0 && bajado != total) throw Exception('descarga incompleta');
-      } finally {
-        cliente.close();
-      }
-      _set(() {
-        _progreso = 1;
-        _estado = 'Toca «Actualizar» (o «Instalar») en el aviso de Android. Tu ID se conserva.';
-      });
-      final ok = await gFFI.invokeMethod('jt_instalar_apk', f.path);
-      if (ok != true) throw Exception('instalador');
-    } catch (_) {
-      _set(() => _estado =
-          'No se pudo instalar desde la app. Se abre la descarga en el navegador: cuando termine, '
-          'toca «Abrir» y luego «Actualizar».');
-      await _abrirNavegador();
-    }
-    _set(() => _descargando = false);
-  }
-
   static const String _pasos =
-      'Toca «Actualizar ahora». La primera vez, Android te pide permitir que esta app instale '
-      'actualizaciones: activa «Permitir de esta fuente» y vuelve. Al final toca «Actualizar». '
-      'Si Android dice que la app no es segura, toca «Más detalles» y «Instalar de todas formas». '
-      'Tu ID se conserva.';
-
-  List<Widget> _progresoWidgets() {
-    return [
-      if (_estado.isNotEmpty) ...[
-        const SizedBox(height: 10),
-        Text(_estado, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
-      ],
-      if (_descargando) ...[
-        const SizedBox(height: 8),
-        LinearProgressIndicator(value: _progreso),
-      ],
-    ];
-  }
+      'Toca «Actualizar ahora». Se descarga la versión nueva; cuando termine, toca «Abrir» y '
+      'luego «Actualizar» (o «Instalar»). Si Android dice que la app no es segura, toca '
+      '«Más detalles» y «Instalar de todas formas». Tu ID se conserva.';
 
   void _mostrarBloqueo() {
     if (_bloqueo || !mounted) return;
@@ -296,14 +170,13 @@ class _JtActualizacionState extends State<JtActualizacion>
                           style: const TextStyle(fontSize: 15)),
                       const SizedBox(height: 10),
                       const Text(_pasos, style: TextStyle(fontSize: 14)),
-                      ..._progresoWidgets(),
                       const SizedBox(height: 14),
                       ElevatedButton(
                         style: ElevatedButton.styleFrom(
                             padding: const EdgeInsets.symmetric(vertical: 12)),
-                        onPressed: _descargando ? null : _actualizar,
-                        child: Text(_descargando ? 'Descargando…' : 'Actualizar ahora',
-                            style: const TextStyle(fontSize: 16)),
+                        onPressed: _actualizar,
+                        child: const Text('Actualizar ahora',
+                            style: TextStyle(fontSize: 16)),
                       ),
                     ]
                   : [
@@ -332,16 +205,15 @@ class _JtActualizacionState extends State<JtActualizacion>
       titleIcon: const Icon(Icons.system_update, color: Color(0xff0071ff)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         const Text(_pasos, style: TextStyle(fontSize: 14)),
-        ..._progresoWidgets(),
         const SizedBox(height: 10),
         SizedBox(
           width: double.infinity,
           child: ElevatedButton(
             style: ElevatedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(vertical: 12)),
-            onPressed: _descargando ? null : _actualizar,
-            child: Text(_descargando ? 'Descargando…' : 'Actualizar ahora',
-                style: const TextStyle(fontSize: 16)),
+            onPressed: _actualizar,
+            child:
+                const Text('Actualizar ahora', style: TextStyle(fontSize: 16)),
           ),
         ),
       ]),
@@ -529,341 +401,6 @@ class _JtAsistenteState extends State<JtAsistente> with WidgetsBindingObserver {
 }
 """
 
-SESION = r"""
-
-// ---------------------------------------------------------------------------------------------------
-// Soporte JUSTECNO: iniciar sesión con la Cuenta JUSTECNO (obligatorio para recibir soporte).
-// Sin sesión, un aviso que no se cierra abre soporte.justecno.com/conectar-equipo/?c=CODIGO en el navegador.
-// La app pregunta cada 5 segundos y al volver; cuando el celular queda conectado, el aviso se cierra solo.
-// Sin red o si el servidor no responde, no bloquea.
-// ---------------------------------------------------------------------------------------------------
-const String _kJtSesionUrl = 'https://rustdesk.justecno.com/app-api/v1/sesion';
-
-class JtSesion extends StatefulWidget {
-  const JtSesion({Key? key}) : super(key: key);
-
-  @override
-  State<JtSesion> createState() => _JtSesionState();
-}
-
-class _JtSesionState extends State<JtSesion> with WidgetsBindingObserver {
-  final ValueNotifier<int> _cambio = ValueNotifier<int>(0);
-  Timer? _retry;
-  Timer? _espera;
-  DateTime? _esperaHasta;
-  int _retries = 0;
-  bool _cargado = false;
-  bool _conectado = false;
-  String _nombre = '';
-  String _usuario = '';
-  String _url = '';
-  bool _abriendo = false;
-  bool _cerrando = false;
-  String _error = '';
-  bool _dialogo = false;
-  NavigatorState? _nav;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    Future.delayed(const Duration(seconds: 2), _load);
-  }
-
-  @override
-  void dispose() {
-    _retry?.cancel();
-    _espera?.cancel();
-    WidgetsBinding.instance.removeObserver(this);
-    super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _url.isNotEmpty) _comprobar();
-  }
-
-  void _set(VoidCallback f) {
-    if (!mounted) return;
-    setState(f);
-    _cambio.value++;
-  }
-
-  String _texto(dynamic v) => v is String ? v : '';
-
-  Future<Map<String, String>?> _ids() async {
-    try {
-      final id = (await bind.mainGetMyId()).trim();
-      final uuid = (await bind.mainGetUuid()).trim();
-      if (id.isEmpty || uuid.isEmpty) return null;
-      return {'id': id, 'uuid': uuid};
-    } catch (_) {
-      return null;
-    }
-  }
-
-  Map<String, String> get _cab => {
-        'User-Agent': 'SoporteJUSTECNO-Android (build $kJtBuild)',
-        'Accept': 'application/json',
-        'Content-Type': 'application/json; charset=utf-8',
-      };
-
-  // null: no se pudo saber (sin red, el equipo aún no se reporta…)
-  Future<bool?> _consultar() async {
-    final ids = await _ids();
-    if (ids == null) return null;
-    try {
-      final r = await jthttp
-          .get(Uri.parse(_kJtSesionUrl).replace(queryParameters: ids), headers: _cab)
-          .timeout(const Duration(seconds: 15));
-      final d = jtconv.jsonDecode(jtconv.utf8.decode(r.bodyBytes));
-      if (r.statusCode == 200 && d is Map && d['ok'] == true) {
-        final c = d['conectado'] == true;
-        _set(() {
-          _cargado = true;
-          _conectado = c;
-          _nombre = _texto(d['nombre']);
-          _usuario = _texto(d['usuario']);
-        });
-        return c;
-      }
-    } catch (_) {}
-    return null;
-  }
-
-  Future<void> _load() async {
-    final c = await _consultar();
-    if (c == null) {
-      if (_retries < 60 && mounted) {
-        _retries++;
-        _retry?.cancel();
-        _retry = Timer(const Duration(minutes: 1), _load);
-      }
-    } else if (!c) {
-      _mostrar();
-    }
-  }
-
-  Future<void> _comprobar() async {
-    if (await _consultar() == true) {
-      _espera?.cancel();
-      _set(() => _url = '');
-      _nav?.pop();
-    }
-  }
-
-  Future<void> _iniciar() async {
-    if (_abriendo) return;
-    _set(() {
-      _abriendo = true;
-      _error = '';
-    });
-    final ids = await _ids();
-    var error = 'No se pudo abrir el inicio de sesión. Revisa tu conexión a internet e inténtalo de nuevo.';
-    if (ids != null) {
-      try {
-        final r = await jthttp
-            .post(Uri.parse('$_kJtSesionUrl/iniciar'), headers: _cab, body: jtconv.jsonEncode(ids))
-            .timeout(const Duration(seconds: 15));
-        final d = jtconv.jsonDecode(jtconv.utf8.decode(r.bodyBytes));
-        if (r.statusCode == 200 && d is Map && d['ok'] == true &&
-            _texto(d['url']).startsWith('https://soporte.justecno.com/')) {
-          _url = _texto(d['url']);
-          error = '';
-        } else if (d is Map && d['error'] is String) {
-          error = d['error'] as String;
-        }
-      } catch (_) {}
-    }
-    if (error.isEmpty) {
-      await _abrirPagina();
-      _esperaHasta = DateTime.now().add(const Duration(minutes: 20));
-      _espera?.cancel();
-      _espera = Timer.periodic(const Duration(seconds: 5), (t) {
-        if (!mounted || DateTime.now().isAfter(_esperaHasta!)) {
-          t.cancel();
-          _set(() => _url = '');
-          return;
-        }
-        _comprobar();
-      });
-    }
-    _set(() {
-      _abriendo = false;
-      _error = error;
-    });
-  }
-
-  Future<void> _abrirPagina() async {
-    if (_url.isEmpty) return;
-    try {
-      await jturl.launchUrl(Uri.parse(_url), mode: jturl.LaunchMode.externalApplication);
-    } catch (_) {}
-  }
-
-  Future<void> _cerrarSesion() async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('¿Cerrar la sesión en este celular?'),
-        content: const Text('Los técnicos ya no verán este celular hasta que vuelvas a iniciar sesión.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancelar')),
-          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Cerrar sesión')),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    _set(() => _cerrando = true);
-    final ids = await _ids();
-    var listo = false;
-    if (ids != null) {
-      try {
-        final r = await jthttp
-            .post(Uri.parse('$_kJtSesionUrl/cerrar'), headers: _cab, body: jtconv.jsonEncode(ids))
-            .timeout(const Duration(seconds: 15));
-        listo = r.statusCode == 200;
-      } catch (_) {}
-    }
-    _set(() {
-      _cerrando = false;
-      if (listo) {
-        _conectado = false;
-        _nombre = '';
-        _usuario = '';
-      }
-    });
-    if (listo) _mostrar();
-  }
-
-  Widget _paso(String n, String texto) => Padding(
-        padding: const EdgeInsets.only(top: 8),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          SizedBox(width: 22, child: Text(n, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold))),
-          Expanded(child: Text(texto, style: const TextStyle(fontSize: 15))),
-        ]),
-      );
-
-  void _mostrar() {
-    if (_dialogo || !mounted || _conectado) return;
-    _dialogo = true;
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) {
-        _nav = Navigator.of(ctx);
-        return PopScope(
-          canPop: false,
-          child: AlertDialog(
-            title: const Text('Inicia sesión para recibir soporte'),
-            content: SingleChildScrollView(
-              child: ValueListenableBuilder<int>(
-                valueListenable: _cambio,
-                builder: (_, __, ___) => Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    const Text('Así el técnico sabe quién eres antes de conectarse a tu celular. Solo se hace una vez.',
-                        style: TextStyle(fontSize: 15)),
-                    const SizedBox(height: 4),
-                    _paso('1.', 'Toca «Iniciar sesión». Se abre el navegador.'),
-                    _paso('2.', 'Entra a tu Cuenta JUSTECNO o créala. Te enviamos un código a tu correo.'),
-                    _paso('3.', 'Toca «Conectar este equipo» y vuelve a esta app.'),
-                    const SizedBox(height: 10),
-                    const Text('¿Necesitas ayuda? En la página, el botón «Escuchar cómo hacerlo» te explica todo en voz alta.',
-                        style: TextStyle(fontSize: 14)),
-                    const SizedBox(height: 14),
-                    if (_url.isNotEmpty) ...[
-                      const Text('Esperando a que termines en el navegador…',
-                          style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
-                      const SizedBox(height: 8),
-                      const LinearProgressIndicator(),
-                      const SizedBox(height: 10),
-                      OutlinedButton(onPressed: _abrirPagina, child: const Text('Abrir otra vez la página')),
-                    ] else
-                      ElevatedButton(
-                        style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12)),
-                        onPressed: _abriendo ? null : _iniciar,
-                        child: Text(_abriendo ? 'Abriendo…' : 'Iniciar sesión', style: const TextStyle(fontSize: 16)),
-                      ),
-                    if (_error.isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      Text(_error, style: const TextStyle(fontSize: 14, color: Colors.red)),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-    ).whenComplete(() {
-      _nav = null;
-      _dialogo = false;
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (!_cargado) return const SizedBox.shrink();
-    if (!_conectado) {
-      return PaddingCard(
-        title: 'Inicia sesión para recibir soporte',
-        titleIcon: const Icon(Icons.account_circle, color: Color(0xff0071ff)),
-        child: SizedBox(
-          width: double.infinity,
-          child: ElevatedButton(
-            style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12)),
-            onPressed: _mostrar,
-            child: const Text('Iniciar sesión', style: TextStyle(fontSize: 16)),
-          ),
-        ),
-      );
-    }
-    return PaddingCard(
-      title: 'Sesión iniciada',
-      titleIcon: const Icon(Icons.account_circle, color: Colors.green),
-      child: Row(children: [
-        Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(_nombre, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
-            if (_usuario.isNotEmpty)
-              Text('Usuario: $_usuario', style: TextStyle(fontSize: 13, color: MyTheme.darkGray)),
-          ]),
-        ),
-        TextButton(
-          onPressed: _cerrando ? null : _cerrarSesion,
-          child: Text(_cerrando ? 'Cerrando…' : 'Cerrar sesión'),
-        ),
-      ]),
-    );
-  }
-}
-"""
-
-MANIFEST = "flutter/android/app/src/main/AndroidManifest.xml"
-ACTIVIDAD = "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt"
-RUTAS_XML = "flutter/android/app/src/main/res/xml/jt_actualizacion_rutas.xml"
-
-# Instalar la actualización desde la app: la descarga queda en la caché (jt-actualizacion/) y se entrega al
-# instalador de Android con un FileProvider propio.
-INSTALAR_KT = """                "jt_instalar_apk" -> { // Soporte JUSTECNO: abrir el instalador con el .apk descargado
-                    try {
-                        val f = java.io.File(call.arguments as String)
-                        val uri = androidx.core.content.FileProvider.getUriForFile(
-                            context, context.packageName + ".jtactualizacion", f)
-                        val i = Intent(Intent.ACTION_VIEW).apply {
-                            setDataAndType(uri, "application/vnd.android.package-archive")
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-                        }
-                        context.startActivity(i)
-                        result.success(true)
-                    } catch (e: Exception) {
-                        result.success(false)
-                    }
-                }
-"""
-
 CAMBIOS = [
     # la pantalla de compartir va primero (antes estaba el Chat, que sale vacío)
     (INICIO,
@@ -880,28 +417,10 @@ CAMBIOS = [
      "                            : ServiceNotRunningNotification(),\n",
      "                        buildPresetPasswordWarningMobile(),\n"
      "                        const JtActualizacion(), // Soporte JUSTECNO\n"
-     "                        const JtSesion(),\n"
      "                        const JtAsistente(),\n"
      "                        gFFI.serverModel.isStart\n"
      "                            ? ServerInfo()\n"
      "                            : const SizedBox.shrink(),\n"),
-    # permiso para instalar actualizaciones y el FileProvider del .apk descargado
-    (MANIFEST,
-     '    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />\n',
-     '    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />\n'
-     '    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" /> <!-- Soporte JUSTECNO -->\n'),
-    (MANIFEST,
-     "    </application>\n",
-     '        <provider android:name="androidx.core.content.FileProvider"\n'
-     '            android:authorities="${applicationId}.jtactualizacion"\n'
-     '            android:exported="false" android:grantUriPermissions="true">\n'
-     '            <meta-data android:name="android.support.FILE_PROVIDER_PATHS"\n'
-     '                android:resource="@xml/jt_actualizacion_rutas" />\n'
-     '        </provider>\n'
-     "    </application>\n"),
-    (ACTIVIDAD,
-     '                "check_permission" -> {\n',
-     INSTALAR_KT + '                "check_permission" -> {\n'),
 ]
 
 
@@ -921,13 +440,9 @@ def main():
         sys.exit(f"justecno_android: no encontré exactamente una vez {viejo!r} en {SERVIDOR}")
     build = int(os.environ.get("JUSTECNO_BUILD") or 0)
     actualizacion = ACTUALIZACION.replace("const int kJtBuild = 0;", f"const int kJtBuild = {build};")
-    textos[SERVIDOR] = textos[SERVIDOR].replace(viejo, nuevo) + actualizacion + ASISTENTE + SESION
+    textos[SERVIDOR] = textos[SERVIDOR].replace(viejo, nuevo) + actualizacion + ASISTENTE
     for ruta, t in textos.items():
         open(ruta, "w", encoding="utf-8").write(t)
-    os.makedirs(os.path.dirname(RUTAS_XML), exist_ok=True)
-    with open(RUTAS_XML, "w", encoding="utf-8") as f:
-        f.write('<?xml version="1.0" encoding="utf-8"?>\n'
-                '<paths><cache-path name="actualizacion" path="jt-actualizacion/" /></paths>\n')
     print(f"justecno_android: inicio en Compartir pantalla, asistente de permisos y actualización (build {build})")
 
 
