@@ -11,10 +11,9 @@
 //   este equipo, comprueba su SHA-256 con el de version.json y lo instala encima (conserva
 //   ID y ajustes): Windows .exe "--update" (UAC), Mac .dmg "--update" (clave del Mac),
 //   Linux .deb/.rpm/.pkg.tar.zst con pkexec. Si algo falla, queda el botón de la página.
-// - JustecnoAliasCard: inicio de sesión con la Cuenta JUSTECNO (obligatorio para recibir soporte).
-//   Sin sesión, un aviso que no se cierra abre soporte.justecno.com/conectar-equipo/ en el navegador;
-//   allí el cliente entra o crea su cuenta (correo verificado) y conecta el equipo. Los técnicos ven
-//   el equipo en su libreta con el nombre de la cuenta (rustdesk.justecno.com/app-api/v1/sesion).
+// - JustecnoAliasCard: el cliente escribe su nombre completo y un usuario único; se guardan
+//   en la libreta compartida del servidor (rustdesk.justecno.com/app-api/v1/alias) como
+//   "Nombre completo (usuario)". Si otro equipo ya tiene ese usuario: "Nombre de usuario ocupado".
 // - JustecnoMantenimiento (va dentro de JustecnoUpdateCard, así sale en las dos apps): lee el
 //   mantenimiento programado en soporte.justecno.com/wp-json/justecno/v1/mantenimiento. Desde 2 días
 //   antes muestra el aviso; en los últimos 30 minutos, la cuenta regresiva. A los 30, 10, 5 y 1 minuto
@@ -42,6 +41,7 @@ const String _kNombreApp = _kTecnicos ? 'JUSTECNO Técnico' : 'Soporte JUSTECNO'
 const String _kVersionUrl = _kTecnicos
     ? 'https://soporte.justecno.com/descargas/tecnicos/version.json'
     : 'https://rustdesk.justecno.com/app-api/v1/version';
+const String _kAliasUrl = 'https://rustdesk.justecno.com/app-api/v1/alias';
 const String _kDefaultPage = _kTecnicos
     ? 'https://soporte.justecno.com/descargas/tecnicos/'
     : 'https://soporte.justecno.com/soporte/';
@@ -853,15 +853,8 @@ class _JustecnoActualizacionState extends State<_JustecnoActualizacion> {
 }
 
 // ---------------------------------------------------------------------------
-// Sesión con la Cuenta JUSTECNO (antes: nombre y usuario escritos en la app)
+// Nombre (alias) para el técnico
 // ---------------------------------------------------------------------------
-// Al abrir la app pregunta a rustdesk.justecno.com/app-api/v1/sesion si este equipo ya está conectado a una
-// cuenta. Si no, muestra un aviso que no se cierra: «Iniciar sesión» pide un código de un solo uso
-// (v1/sesion/iniciar) y abre en el navegador soporte.justecno.com/conectar-equipo/?c=CODIGO, donde el cliente
-// entra o crea su cuenta (correo verificado con un código) y pulsa «Conectar este equipo». Mientras tanto la app
-// pregunta cada 5 segundos; cuando queda conectada, el aviso se cierra solo y la tarjeta muestra el nombre.
-// Los técnicos solo ven en su libreta los equipos conectados a una cuenta.
-// Sin red o si el servidor no responde, no bloquea (reintenta cada minuto).
 
 class JustecnoAliasCard extends StatefulWidget {
   const JustecnoAliasCard({Key? key}) : super(key: key);
@@ -871,24 +864,22 @@ class JustecnoAliasCard extends StatefulWidget {
 }
 
 class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
-  static const String _kSesionUrl = 'https://rustdesk.justecno.com/app-api/v1/sesion';
+  // Mismas reglas que el servidor (app-api/v1/alias)
+  static final _usuarioOk = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{2,29}$');
 
-  final _cambio = ValueNotifier<int>(0);
+  final _nombre = TextEditingController();
+  final _usuario = TextEditingController();
   Timer? _retry;
-  Timer? _espera;
-  DateTime? _esperaHasta;
   int _retries = 0;
-  bool _cargado = false;
-  bool _conectado = false;
-  String _nombre = '';
-  String _usuario = '';
-  String _url = '';
-  bool _abriendo = false;
-  bool _cerrando = false;
-  String _mensaje = '';
-  bool _mensajeError = false;
-  bool _dialogoAbierto = false;
-  NavigatorState? _navDialogo;
+  String _nombreGuardado = '';
+  String _usuarioGuardado = '';
+  bool _loaded = false;
+  bool _editing = false;
+  bool _saving = false;
+  String _message = '';
+  bool _messageIsError = false;
+  String? _errorNombre;
+  String? _errorUsuario;
 
   @override
   void initState() {
@@ -899,15 +890,9 @@ class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
   @override
   void dispose() {
     _retry?.cancel();
-    _espera?.cancel();
-    _cambio.dispose();
+    _nombre.dispose();
+    _usuario.dispose();
     super.dispose();
-  }
-
-  void _set(VoidCallback f) {
-    if (!mounted) return;
-    setState(f);
-    _cambio.value++;
   }
 
   Future<Map<String, String>?> _ids() async {
@@ -923,8 +908,8 @@ class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
 
   void _scheduleRetry() {
     // El equipo puede tardar en reportarse al servidor o no haber red:
-    // reintenta cada minuto, como mucho 60 veces, sin bloquear la app.
-    if (_retries >= 60 || !mounted) return;
+    // reintenta cada minuto, como mucho 30 veces, sin molestar al usuario.
+    if (_retries >= 30 || !mounted) return;
     _retries++;
     _retry?.cancel();
     _retry = Timer(const Duration(minutes: 1), _load);
@@ -932,299 +917,208 @@ class _JustecnoAliasCardState extends State<JustecnoAliasCard> {
 
   String _texto(dynamic v) => v is String ? v : '';
 
-  // null: no se pudo saber (sin red, el equipo aún no se reporta…)
-  Future<bool?> _consultar() async {
+  Future<void> _load() async {
     final ids = await _ids();
-    if (ids == null) return null;
+    if (ids == null) {
+      _scheduleRetry();
+      return;
+    }
     try {
-      final uri = Uri.parse(_kSesionUrl).replace(queryParameters: ids);
+      final uri = Uri.parse(_kAliasUrl).replace(queryParameters: ids);
       final resp =
           await http.get(uri, headers: await _headers()).timeout(_kTimeout);
       final data = jsonDecode(utf8.decode(resp.bodyBytes));
       if (resp.statusCode == 200 && data is Map && data['ok'] == true) {
-        final conectado = data['conectado'] == true;
-        _set(() {
-          _cargado = true;
-          _conectado = conectado;
-          _nombre = _texto(data['nombre']);
-          _usuario = _texto(data['usuario']);
+        if (!mounted) return;
+        setState(() {
+          _nombreGuardado = _texto(data['nombre']);
+          _usuarioGuardado = _texto(data['usuario']);
+          _loaded = true;
+          if (!_editing) {
+            _nombre.text = _nombreGuardado;
+            _usuario.text = _usuarioGuardado;
+          }
         });
-        return conectado;
+        return;
       }
     } catch (_) {}
-    return null;
+    _scheduleRetry();
   }
 
-  Future<void> _load() async {
-    final conectado = await _consultar();
-    if (conectado == null) {
-      _scheduleRetry();
-    } else if (!conectado) {
-      _mostrarDialogo();
+  Future<void> _save() async {
+    final nombre = _nombre.text.trim().split(RegExp(r'\s+')).join(' ');
+    final usuario = _usuario.text.trim();
+    String? errNombre;
+    String? errUsuario;
+    if (nombre.length < 3 || nombre.length > 60) {
+      errNombre = 'Escribe tu nombre completo';
     }
-  }
-
-  Future<void> _iniciar() async {
-    if (_abriendo) return;
-    _set(() {
-      _abriendo = true;
-      _mensaje = '';
+    if (!_usuarioOk.hasMatch(usuario)) {
+      errUsuario = 'De 3 a 30 letras o números, sin espacios (puedes usar . _ -)';
+    }
+    if (errNombre != null || errUsuario != null) {
+      setState(() {
+        _errorNombre = errNombre;
+        _errorUsuario = errUsuario;
+        _message = '';
+      });
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _message = '';
+      _errorNombre = null;
+      _errorUsuario = null;
     });
     final ids = await _ids();
-    var error = 'No se pudo abrir el inicio de sesión. Revisa tu conexión a internet e inténtalo de nuevo.';
+    var message = 'No se pudo guardar. Revisa tu conexión e inténtalo de nuevo.';
+    var isError = true;
     if (ids != null) {
       try {
         final resp = await http
-            .post(Uri.parse('$_kSesionUrl/iniciar'),
-                headers: await _headers(json: true), body: jsonEncode(ids))
+            .post(Uri.parse(_kAliasUrl),
+                headers: await _headers(json: true),
+                body: jsonEncode({...ids, 'usuario': usuario, 'nombre': nombre}))
             .timeout(_kTimeout);
         final data = jsonDecode(utf8.decode(resp.bodyBytes));
-        if (resp.statusCode == 200 && data is Map && data['ok'] == true &&
-            _texto(data['url']).startsWith('https://soporte.justecno.com/')) {
-          _url = _texto(data['url']);
-          error = '';
+        if (resp.statusCode == 200 && data is Map && data['ok'] == true) {
+          isError = false;
+          _nombreGuardado = _texto(data['nombre']).isNotEmpty ? _texto(data['nombre']) : nombre;
+          _usuarioGuardado = _texto(data['usuario']).isNotEmpty ? _texto(data['usuario']) : usuario;
+          message = 'Guardado. El técnico te encontrará como "$_nombreGuardado".';
+          _loaded = true;
+          _editing = false;
+          _retry?.cancel();
         } else if (data is Map && data['error'] is String) {
-          error = data['error'] as String;
+          final error = data['error'] as String;
+          if (data['campo'] == 'usuario') {
+            _errorUsuario = error;
+            message = '';
+          } else if (data['campo'] == 'nombre') {
+            _errorNombre = error;
+            message = '';
+          } else {
+            message = error;
+          }
         }
       } catch (_) {}
     }
-    if (error.isEmpty) {
-      await _abrirPagina();
-      _esperar();
-    }
-    _set(() {
-      _abriendo = false;
-      _mensaje = error;
-      _mensajeError = error.isNotEmpty;
+    if (!mounted) return;
+    setState(() {
+      _saving = false;
+      _message = message;
+      _messageIsError = isError;
     });
   }
 
-  Future<void> _abrirPagina() async {
-    if (_url.isEmpty) return;
-    try {
-      await launchUrl(Uri.parse(_url), mode: LaunchMode.externalApplication);
-    } catch (_) {}
-  }
-
-  // Pregunta cada 5 segundos mientras el cliente termina en el navegador (el enlace dura 20 minutos)
-  void _esperar() {
-    _esperaHasta = DateTime.now().add(const Duration(minutes: 20));
-    _espera?.cancel();
-    _espera = Timer.periodic(const Duration(seconds: 5), (t) async {
-      if (!mounted || DateTime.now().isAfter(_esperaHasta!)) {
-        t.cancel();
-        _set(() => _url = '');
-        return;
-      }
-      if (await _consultar() == true) {
-        t.cancel();
-        _set(() {
-          _url = '';
-          _mensaje = '¡Listo, $_nombre! Ya puedes recibir soporte.';
-          _mensajeError = false;
-        });
-        try {
-          await windowManager.show();
-          await windowManager.focus();
-        } catch (_) {}
-        _navDialogo?.pop();
-      }
-    });
-    _set(() {});
-  }
-
-  Future<void> _cerrarSesion() async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('¿Cerrar la sesión en este equipo?'),
-        content: const Text(
-            'Los técnicos ya no verán este equipo hasta que vuelvas a iniciar sesión.'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('Cancelar')),
-          TextButton(
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: const Text('Cerrar sesión')),
-        ],
-      ),
+  InputDecoration _campo(String hint, String? error, {String? ayuda}) {
+    return InputDecoration(
+      isDense: true,
+      counterText: '',
+      hintText: hint,
+      helperText: ayuda,
+      helperMaxLines: 2,
+      errorText: error,
+      errorMaxLines: 2,
+      border: const OutlineInputBorder(),
     );
-    if (ok != true) return;
-    _set(() => _cerrando = true);
-    final ids = await _ids();
-    var listo = false;
-    if (ids != null) {
-      try {
-        final resp = await http
-            .post(Uri.parse('$_kSesionUrl/cerrar'),
-                headers: await _headers(json: true), body: jsonEncode(ids))
-            .timeout(_kTimeout);
-        listo = resp.statusCode == 200;
-      } catch (_) {}
-    }
-    _set(() {
-      _cerrando = false;
-      _mensaje = listo ? '' : 'No se pudo cerrar la sesión. Revisa tu conexión.';
-      _mensajeError = !listo;
-      if (listo) {
-        _conectado = false;
-        _nombre = '';
-        _usuario = '';
-      }
-    });
-    if (listo) _mostrarDialogo();
-  }
-
-  // Aviso que no se puede cerrar mientras el equipo no esté conectado a una cuenta.
-  void _mostrarDialogo() {
-    if (_dialogoAbierto || !mounted || _conectado) return;
-    _dialogoAbierto = true;
-    () async {
-      try {
-        await windowManager.show();
-        await windowManager.focus();
-      } catch (_) {}
-      if (!mounted) {
-        _dialogoAbierto = false;
-        return;
-      }
-      await showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (ctx) {
-          _navDialogo = Navigator.of(ctx);
-          return PopScope(
-            canPop: false,
-            child: AlertDialog(
-              title: const Text('Inicia sesión para recibir soporte'),
-              content: SizedBox(
-                width: 460,
-                child: ValueListenableBuilder<int>(
-                  valueListenable: _cambio,
-                  builder: (_, __, ___) => Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: _contenidoDialogo(),
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
-      );
-      _navDialogo = null;
-      _dialogoAbierto = false;
-    }();
-  }
-
-  Widget _paso(String numero, String texto) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-              width: 22,
-              child: Text(numero,
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14))),
-          Expanded(child: Text(texto, style: const TextStyle(fontSize: 14))),
-        ],
-      ),
-    );
-  }
-
-  List<Widget> _contenidoDialogo() {
-    final esperando = _url.isNotEmpty;
-    final children = <Widget>[
-      const Text(
-          'Así el técnico sabe quién eres antes de conectarse a tu equipo. '
-          'Solo se hace una vez.',
-          style: TextStyle(fontSize: 14)),
-      const SizedBox(height: 6),
-      _paso('1.', 'Pulsa «Iniciar sesión». Se abre tu navegador.'),
-      _paso('2.', 'Entra a tu Cuenta JUSTECNO o créala. Te enviamos un código a tu correo.'),
-      _paso('3.', 'Pulsa «Conectar este equipo» y vuelve aquí.'),
-      const SizedBox(height: 10),
-      const Text(
-          '¿Necesitas ayuda? En la página, el botón «Escuchar cómo hacerlo» te explica todo en voz alta.',
-          style: TextStyle(fontSize: 13)),
-      const SizedBox(height: 14),
-    ];
-    if (esperando) {
-      children.addAll([
-        const Text('Esperando a que termines en el navegador…',
-            style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 8),
-        const LinearProgressIndicator(),
-        const SizedBox(height: 10),
-        OutlinedButton(
-          onPressed: _abrirPagina,
-          child: const Text('Abrir otra vez la página'),
-        ),
-      ]);
-    } else {
-      children.add(SizedBox(
-        height: 44,
-        child: ElevatedButton(
-          style: ElevatedButton.styleFrom(
-              backgroundColor: _kBlue, foregroundColor: Colors.white),
-          onPressed: _abriendo ? null : _iniciar,
-          child: Text(_abriendo ? 'Abriendo…' : 'Iniciar sesión',
-              style: const TextStyle(fontSize: 15)),
-        ),
-      ));
-    }
-    if (_mensaje.isNotEmpty && _mensajeError) {
-      children.addAll([
-        const SizedBox(height: 8),
-        Text(_mensaje, style: const TextStyle(fontSize: 13, color: Colors.red)),
-      ]);
-    }
-    return children;
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!_cargado) return const SizedBox.shrink();
-    final children = <Widget>[];
-    if (_conectado) {
+    final yaGuardado = _usuarioGuardado.isNotEmpty && _nombreGuardado.isNotEmpty;
+    final showForm = !yaGuardado || _editing;
+    final children = <Widget>[
+      const Text('Tus datos para el técnico',
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+      const SizedBox(height: 6),
+    ];
+    if (showForm) {
+      if (!yaGuardado) {
+        children.add(const Text(
+            'Así el técnico te encuentra más rápido. Tu usuario es único: nadie más podrá usarlo.',
+            style: TextStyle(fontSize: 12)));
+      }
       children.addAll([
-        const Text('Sesión iniciada',
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+        const SizedBox(height: 8),
+        const Text('Nombre completo', style: TextStyle(fontSize: 12)),
         const SizedBox(height: 4),
-        Text(_nombre, style: const TextStyle(fontSize: 13)),
-        if (_usuario.isNotEmpty)
-          Text('Usuario: $_usuario',
-              style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor)),
-        Align(
-          alignment: Alignment.centerRight,
-          child: TextButton(
-            onPressed: _cerrando ? null : _cerrarSesion,
-            child: Text(_cerrando ? 'Cerrando…' : 'Cerrar sesión'),
-          ),
+        TextField(
+          controller: _nombre,
+          maxLength: 60,
+          enabled: !_saving,
+          textCapitalization: TextCapitalization.words,
+          style: const TextStyle(fontSize: 13),
+          decoration: _campo('Juan Pérez Gómez', _errorNombre),
+          onSubmitted: (_) => _save(),
         ),
+        const SizedBox(height: 8),
+        const Text('Usuario', style: TextStyle(fontSize: 12)),
+        const SizedBox(height: 4),
+        TextField(
+          controller: _usuario,
+          maxLength: 30,
+          enabled: !_saving,
+          autocorrect: false,
+          style: const TextStyle(fontSize: 13),
+          decoration: _campo('juanperez', _errorUsuario,
+              ayuda: 'Sin espacios. Puedes usar letras, números y . _ -'),
+          onSubmitted: (_) => _save(),
+        ),
+        const SizedBox(height: 10),
+        Row(children: [
+          Expanded(
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: _kBlue, foregroundColor: Colors.white),
+              onPressed: _saving ? null : _save,
+              child: Text(_saving ? 'Guardando…' : 'Guardar'),
+            ),
+          ),
+          if (_editing) ...[
+            const SizedBox(width: 8),
+            TextButton(
+              onPressed: _saving
+                  ? null
+                  : () => setState(() {
+                        _editing = false;
+                        _errorNombre = null;
+                        _errorUsuario = null;
+                        _message = '';
+                        _nombre.text = _nombreGuardado;
+                        _usuario.text = _usuarioGuardado;
+                      }),
+              child: const Text('Cancelar'),
+            ),
+          ],
+        ]),
       ]);
     } else {
       children.addAll([
-        const Text('Inicia sesión para recibir soporte',
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-        const SizedBox(height: 8),
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(
-              backgroundColor: _kBlue, foregroundColor: Colors.white),
-          onPressed: _mostrarDialogo,
-          child: const Text('Iniciar sesión'),
+        Text(_nombreGuardado, style: const TextStyle(fontSize: 13)),
+        Text('Usuario: $_usuarioGuardado',
+            style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor)),
+        Align(
+          alignment: Alignment.centerRight,
+          child: TextButton(
+            onPressed: () => setState(() {
+              _editing = true;
+              _message = '';
+              _nombre.text = _nombreGuardado;
+              _usuario.text = _usuarioGuardado;
+            }),
+            child: const Text('Cambiar'),
+          ),
         ),
       ]);
     }
-    if (_mensaje.isNotEmpty) {
+    if (_message.isNotEmpty) {
       children.add(Padding(
         padding: const EdgeInsets.only(top: 6),
-        child: Text(_mensaje,
+        child: Text(_message,
             style: TextStyle(
                 fontSize: 12,
-                color: _mensajeError ? Colors.red : Colors.green.shade700)),
+                color: _messageIsError ? Colors.red : Colors.green.shade700)),
       ));
     }
     return _card(context, children);
