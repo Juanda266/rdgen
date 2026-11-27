@@ -143,6 +143,32 @@ CAMBIOS = [
      "            &files,\n"
      "        );\n"
      "        if self.server_audit_file.is_empty() {\n"),
+    # corte nocturno de servidores (2026-11-26): avisos por el chat y cierre al llegar el tiempo límite
+    (CONEXION,
+     "                _ = second_timer.tick() => {\n"
+     "                    #[cfg(windows)]\n"
+     "                    conn.portable_check();\n",
+     "                _ = second_timer.tick() => {\n"
+     "                    // Soporte JUSTECNO: corte nocturno de servidores (justecno_registro.rs)\n"
+     "                    if let Some(texto) = crate::hbbs_http::justecno_registro::corte_aviso(id) {\n"
+     "                        let mut misc = Misc::new();\n"
+     "                        misc.set_chat_message(ChatMessage {\n"
+     "                            text: texto.clone(),\n"
+     "                            ..Default::default()\n"
+     "                        });\n"
+     "                        let mut msg_out = Message::new();\n"
+     "                        msg_out.set_misc(misc);\n"
+     "                        conn.send(msg_out).await;\n"
+     "                        conn.send_to_cm(ipc::Data::ChatMessage { text: texto });\n"
+     "                    }\n"
+     "                    if crate::hbbs_http::justecno_registro::corte_ya() {\n"
+     "                        let motivo = crate::hbbs_http::justecno_registro::corte_motivo();\n"
+     "                        conn.send_close_reason_no_retry(&motivo).await;\n"
+     "                        conn.on_close(\"corte nocturno JUSTECNO\", true).await;\n"
+     "                        break;\n"
+     "                    }\n"
+     "                    #[cfg(windows)]\n"
+     "                    conn.portable_check();\n"),
     (TERMINAL,
      "        data: &TerminalData,\n    ) -> Result<Option<TerminalResponse>> {\n",
      "        data: &TerminalData,\n    ) -> Result<Option<TerminalResponse>> {\n"
@@ -203,7 +229,7 @@ def main():
         url = (f"https://raw.githubusercontent.com/{os.environ['GITHUB_REPOSITORY']}/{os.environ['GITHUB_SHA']}"
                "/.github/patches/justecno/justecno_registro.rs")
         rust = urllib.request.urlopen(url, timeout=60).read()
-    if b"pub fn terminal(" not in rust:
+    if b"pub fn terminal(" not in rust or b"pub fn corte_ya(" not in rust:
         sys.exit("justecno_grabacion: justecno_registro.rs no es el esperado")
     for ruta, t in textos.items():
         open(ruta, "w", encoding="utf-8").write(t)
