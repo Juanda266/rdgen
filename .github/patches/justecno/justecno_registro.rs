@@ -219,3 +219,132 @@ fn copiar(
         }
     }
 }
+
+// ------------------------------------------------------------------ Corte nocturno de servidores (2026-11-26)
+// El servidor de JUSTECNO publica en CORTE_URL el "tiempo límite" (inicio_ts: a esa hora se cierran las sesiones) y la
+// hora en que vuelve (fin_ts). Este equipo lo consulta cada 5 minutos (cada minuto en la última hora) y lo recuerda en
+// un archivo, por si el servidor ya está apagado. Cada sesión entrante (src/server/connection.rs, reloj de 1 s):
+//   - a los 15, 10, 5 y 1 minuto avisa por el chat al técnico y al cliente;
+//   - al llegar el tiempo límite se cierra sola, para que la grabación alcance a guardarse antes del apagado.
+// Funciona igual si la sesión va directa entre los dos equipos o por el relay. Sin corte publicado, no hace nada.
+const CORTE_URL: &str = "https://soporte.justecno.com/wp-json/justecno/v1/mantenimiento";
+const CORTE_AVISOS_MIN: [i64; 4] = [1, 5, 10, 15];
+
+static CORTE_HILO: std::sync::Once = std::sync::Once::new();
+lazy_static::lazy_static! {
+    static ref CORTE: Mutex<Option<(i64, i64)>> = Mutex::new(corte_leer_guardado());
+    static ref CORTE_AVISADOS: Mutex<std::collections::HashMap<i32, i64>> = Default::default();
+}
+
+fn ahora_s() -> i64 {
+    (ahora_ms() / 1000) as i64
+}
+
+fn corte_archivo() -> PathBuf {
+    std::env::temp_dir().join("justecno-corte.txt")
+}
+
+fn corte_leer_guardado() -> Option<(i64, i64)> {
+    let t = std::fs::read_to_string(corte_archivo()).ok()?;
+    let mut p = t.trim().split(',').map(|x| x.parse::<i64>().ok());
+    match (p.next().flatten(), p.next().flatten()) {
+        (Some(i), Some(f)) if f > i && f > ahora_s() => Some((i, f)),
+        _ => None,
+    }
+}
+
+fn corte_consultar() -> u64 {
+    let r = super::create_http_client_with_url(CORTE_URL)
+        .get(CORTE_URL)
+        .timeout(Duration::from_secs(20))
+        .send()
+        .and_then(|r| r.json::<Value>());
+    match r {
+        // Solo se cree una respuesta del servicio (trae "fase"); si no hay internet o el servidor está apagado,
+        // se sigue con lo último que se supo.
+        Ok(v) if v.get("fase").is_some() => {
+            let nuevo = match (v["inicio_ts"].as_i64(), v["fin_ts"].as_i64()) {
+                (Some(i), Some(f)) if f > i => Some((i, f)),
+                _ => None,
+            };
+            if *CORTE.lock().unwrap() != nuevo {
+                log::info!("Soporte JUSTECNO: corte de servidores {:?}", nuevo);
+            }
+            *CORTE.lock().unwrap() = nuevo;
+            let _ = std::fs::write(
+                corte_archivo(),
+                nuevo.map(|(i, f)| format!("{},{}", i, f)).unwrap_or_default(),
+            );
+        }
+        Ok(_) => {}
+        Err(e) => log::debug!("Soporte JUSTECNO: no se pudo consultar el corte: {}", e),
+    }
+    let ahora = ahora_s();
+    match *CORTE.lock().unwrap() {
+        Some((i, _)) if i > ahora && i - ahora <= 3600 => 60,
+        _ => 300,
+    }
+}
+
+fn corte_iniciar() {
+    CORTE_HILO.call_once(|| {
+        std::thread::spawn(|| loop {
+            let espera = corte_consultar();
+            std::thread::sleep(Duration::from_secs(espera));
+        });
+    });
+}
+
+// Hora de Colombia (UTC-5, sin horario de verano), p. ej. "9:45 p. m."
+fn corte_hora(t: i64) -> String {
+    let s = (t - 5 * 3600).rem_euclid(86400);
+    let (h, m) = (s / 3600, s / 60 % 60);
+    let h12 = if h % 12 == 0 { 12 } else { h % 12 };
+    format!("{}:{:02} {}", h12, m, if h < 12 { "a. m." } else { "p. m." })
+}
+
+/// ¿Ya llegó el tiempo límite? (la sesión se cierra)
+pub fn corte_ya() -> bool {
+    corte_iniciar();
+    let ahora = ahora_s();
+    matches!(*CORTE.lock().unwrap(), Some((i, f)) if ahora >= i && ahora < f)
+}
+
+/// Texto de "tiempo límite" para el chat de la sesión `conn`, una vez por cada aviso (15, 10, 5 y 1 minuto).
+pub fn corte_aviso(conn: i32) -> Option<String> {
+    corte_iniciar();
+    let (ini, fin) = (*CORTE.lock().unwrap())?;
+    let faltan = ini - ahora_s();
+    let mut avisados = CORTE_AVISADOS.lock().unwrap();
+    if faltan <= 0 || faltan > 15 * 60 {
+        if faltan <= 0 || avisados.len() > 500 {
+            avisados.clear();
+        }
+        return None;
+    }
+    let tramo = *CORTE_AVISOS_MIN.iter().find(|m| faltan <= *m * 60)?;
+    if avisados.get(&conn).map_or(false, |t| *t <= tramo) {
+        return None;
+    }
+    avisados.insert(conn, tramo);
+    let min = (faltan + 59) / 60;
+    Some(format!(
+        "⏰ Aviso automático de JUSTECNO: tiempo límite a las {}. Queda{} {} minuto{}: a esa hora esta sesión se cierra sola \
+         por el corte nocturno de servidores (vuelven a las {}). Terminen y guarden lo que estén haciendo.",
+        corte_hora(ini),
+        if min == 1 { "" } else { "n" },
+        min,
+        if min == 1 { "" } else { "s" },
+        corte_hora(fin)
+    ))
+}
+
+/// Motivo de cierre que ve el técnico
+pub fn corte_motivo() -> String {
+    let fin = (*CORTE.lock().unwrap()).map(|(_, f)| f).unwrap_or(0);
+    format!(
+        "Sesión cerrada por JUSTECNO: llegó el tiempo límite del corte nocturno de servidores. La grabación quedó guardada. \
+         Los servidores vuelven a las {}.",
+        corte_hora(fin)
+    )
+}
