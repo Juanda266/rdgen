@@ -143,6 +143,9 @@ class _JustecnoMantenimientoState extends State<JustecnoMantenimiento> {
   Timer? _reloj;
   DateTime? _ini;
   DateTime? _fin;
+  DateTime? _avisoDesde; // corte nocturno: el aviso sale solo desde esta hora (no 2 días antes)
+  DateTime? _apagado;
+  bool _noct = false;
   String _mensaje = '';
   bool _cerrado = false;
   final Set<String> _avisados = {};
@@ -182,9 +185,13 @@ class _JustecnoMantenimientoState extends State<JustecnoMantenimiento> {
         final data = jsonDecode(utf8.decode(resp.bodyBytes));
         if (data is Map && mounted) {
           final ini = data['inicio'], fin = data['fin'], msg = data['mensaje'];
+          final aviso = data['aviso_desde'], apagado = data['apagado'];
           setState(() {
             _ini = ini is String ? DateTime.tryParse(ini) : null;
             _fin = fin is String ? DateTime.tryParse(fin) : null;
+            _avisoDesde = aviso is String ? DateTime.tryParse(aviso) : null;
+            _apagado = apagado is String ? DateTime.tryParse(apagado) : null;
+            _noct = data['tipo'] == 'nocturno';
             _mensaje = msg is String ? msg : '';
           });
         }
@@ -202,6 +209,8 @@ class _JustecnoMantenimientoState extends State<JustecnoMantenimiento> {
     if (!ahora.isBefore(ini)) return 'activo';
     final falta = ini.difference(ahora);
     if (falta <= const Duration(minutes: 30)) return 'pronto';
+    final desde = _avisoDesde;
+    if (desde != null) return ahora.isBefore(desde) ? '' : 'anuncio';
     return falta <= const Duration(days: 2) ? 'anuncio' : '';
   }
 
@@ -229,7 +238,7 @@ class _JustecnoMantenimientoState extends State<JustecnoMantenimiento> {
     if (!mounted) return;
     showDialog<void>(
       context: context,
-      builder: (ctx) => _DialogoMantenimiento(ini: _ini!),
+      builder: (ctx) => _DialogoMantenimiento(ini: _ini!, noct: _noct, fin: _fin),
     );
   }
 
@@ -244,7 +253,23 @@ class _JustecnoMantenimientoState extends State<JustecnoMantenimiento> {
     final color = fase == 'anuncio' ? _kAmbar : _kRojo;
     final String titulo;
     final String texto;
-    if (fase == 'activo') {
+    final apagado = _apagado ?? ini;
+    if (_noct && fase == 'activo') {
+      titulo = 'Servidores apagados hasta las ${_hora(fin)}';
+      texto = 'El soporte remoto vuelve solo a esa hora.';
+    } else if (_noct && fase == 'pronto') {
+      titulo = 'Tiempo límite: ${_resta(ini.difference(ahora))}';
+      texto = _kTecnicos
+          ? 'A las ${_hora(ini)} se cierran solas todas las sesiones por el corte de '
+              'servidores de las ${_hora(apagado)}. No empieces una nueva y avísale al cliente.'
+          : 'A las ${_hora(ini)} se cierra sola cualquier sesión de soporte por el corte '
+              'nocturno de servidores. Vuelve a las ${_hora(fin)}.';
+    } else if (_noct) {
+      titulo = 'Corte de servidores a las ${_hora(apagado)}';
+      texto = _mensaje.isNotEmpty
+          ? _mensaje
+          : 'Las sesiones de soporte se cierran a las ${_hora(ini)}.';
+    } else if (fase == 'activo') {
       titulo = 'En mantenimiento hasta las ${_hora(fin)}';
       texto = 'El servicio de soporte vuelve solo a esa hora.';
     } else if (fase == 'pronto') {
@@ -296,7 +321,11 @@ class _JustecnoMantenimientoState extends State<JustecnoMantenimiento> {
 
 class _DialogoMantenimiento extends StatefulWidget {
   final DateTime ini;
-  const _DialogoMantenimiento({Key? key, required this.ini}) : super(key: key);
+  final bool noct;
+  final DateTime? fin;
+  const _DialogoMantenimiento(
+      {Key? key, required this.ini, this.noct = false, this.fin})
+      : super(key: key);
 
   @override
   State<_DialogoMantenimiento> createState() => _DialogoMantenimientoState();
@@ -327,6 +356,27 @@ class _DialogoMantenimientoState extends State<_DialogoMantenimiento> {
   @override
   Widget build(BuildContext context) {
     final falta = widget.ini.difference(DateTime.now());
+    final fin = widget.fin;
+    if (widget.noct) {
+      return AlertDialog(
+        title: Text('Tiempo límite: quedan ${_resta(falta)}'),
+        content: Text(_kTecnicos
+            ? 'A las ${_hora(widget.ini)} se cierran solas todas las sesiones de control '
+                'remoto, terminal y archivos por el corte nocturno de servidores. '
+                'Termina, guarda y avísale al cliente.'
+            : 'A las ${_hora(widget.ini)} se cierra sola cualquier sesión de soporte por el '
+                'corte nocturno de servidores${fin != null ? ' (vuelven a las ${_hora(fin)})' : ''}. '
+                'Guarda lo que estés haciendo.'),
+        actions: [
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: _kBlue, foregroundColor: Colors.white),
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Entendido'),
+          ),
+        ],
+      );
+    }
     return AlertDialog(
       title: Text('Quedan ${_resta(falta)} para el mantenimiento'),
       content: Text(_kTecnicos
